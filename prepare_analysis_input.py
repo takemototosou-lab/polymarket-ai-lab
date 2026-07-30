@@ -1,4 +1,5 @@
 import csv
+import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -154,3 +155,26 @@ def read_analysis_records(path: Path) -> list[dict[str, str]]:
         records.append(record)
 
     return records
+
+
+def _json_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def serialize_analysis_input(records: list[dict[str, str]]) -> bytes:
+    if not records:
+        return b"[]\n"
+
+    lines = ["["]
+    for record_index, record in enumerate(records):
+        lines.append("  {")
+        for key_index, key in enumerate(JSON_KEYS):
+            value = (
+                record[key] if key in NUMERIC_KEYS else _json_string(record[key])
+            )
+            comma = "," if key_index < len(JSON_KEYS) - 1 else ""
+            lines.append(f"    {_json_string(key)}: {value}{comma}")
+        object_comma = "," if record_index < len(records) - 1 else ""
+        lines.append(f"  }}{object_comma}")
+    lines.append("]")
+    return ("\n".join(lines) + "\n").encode("utf-8")

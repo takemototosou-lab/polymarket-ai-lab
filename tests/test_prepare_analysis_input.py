@@ -1,4 +1,6 @@
+import codecs
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +59,23 @@ def write_candidate_csv(
         writer.writeheader()
         writer.writerows(rows)
     return path
+
+
+def make_analysis_record(*, market_id="1") -> dict[str, str]:
+    return {
+        "市場ID": market_id,
+        "市場": "市場A",
+        "YES価格": "0.1",
+        "NO価格": "0.9",
+        "出来高": "1000",
+        "流動性": "500.5",
+        "締切日": "2026-08-29T12:00:00Z",
+        "カテゴリ": "その他",
+        "締切までの日数": "30",
+        "URL": "https://polymarket.com/event/example",
+        "分析基準日時": FETCHED_AT,
+        "選定理由": "固定条件",
+    }
 
 
 class CanonicalNumberTests(unittest.TestCase):
@@ -202,6 +221,59 @@ class InputContractTests(unittest.TestCase):
             self.assertEqual(["市場B", "市場A"], [record["市場"] for record in records])
             self.assertNotIn("追加列", records[0])
             self.assertEqual(FETCHED_AT, records[0]["分析基準日時"])
+
+
+class SerializationTests(unittest.TestCase):
+    def test_empty_array_is_exactly_three_bytes(self):
+        self.assertEqual(
+            b"[]\n",
+            prepare_analysis_input.serialize_analysis_input([]),
+        )
+
+    def test_serializes_fixed_layout_without_bom(self):
+        record = {
+            "市場ID": "2",
+            "市場": '日本語 "quote" \\ path\nnext',
+            "YES価格": "0.1",
+            "NO価格": "0.9",
+            "出来高": "1000",
+            "流動性": "500.5",
+            "締切日": "2026-08-29T12:00:00Z",
+            "カテゴリ": "その他",
+            "締切までの日数": "30",
+            "URL": "https://example.test/a",
+            "分析基準日時": FETCHED_AT,
+            "選定理由": "固定条件",
+        }
+
+        payload = prepare_analysis_input.serialize_analysis_input([record])
+
+        self.assertFalse(payload.startswith(codecs.BOM_UTF8))
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertNotIn(b"\r\n", payload)
+        text = payload.decode("utf-8")
+        self.assertIn('"YES価格": 0.1', text)
+        self.assertIn('"市場": "日本語 \\"quote\\" \\\\ path\\nnext"', text)
+        parsed = json.loads(text, object_pairs_hook=list)
+        self.assertEqual(
+            list(prepare_analysis_input.JSON_KEYS),
+            [key for key, _ in parsed[0]],
+        )
+
+    def test_preserves_record_order_and_is_byte_deterministic(self):
+        records = [
+            make_analysis_record(market_id="2"),
+            make_analysis_record(market_id="1"),
+        ]
+
+        first = prepare_analysis_input.serialize_analysis_input(records)
+        second = prepare_analysis_input.serialize_analysis_input(records)
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            ["2", "1"],
+            [item["市場ID"] for item in json.loads(first)],
+        )
 
 
 if __name__ == "__main__":
