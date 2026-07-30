@@ -177,10 +177,12 @@ SCHEMA_VERSION = "2.0"
 | 9 | `conclusion` | string | 固定列挙 |
 | 10 | `confidence` | string | `low`、`medium`、`high` |
 | 11 | `evidence` | array | 根拠項目、1件以上5件以下 |
-| 12 | `counter_evidence` | array | 反対材料、1件以上5件以下 |
-| 13 | `sources` | array | 情報源、2件以上8件以下 |
-| 14 | `model_info` | object | 固定モデル情報契約 |
-| 15 | `analysis_executed_at` | string | UTCの固定日時表記 |
+| 12 | `counter_evidence` | array | 反対材料、0件以上5件以下 |
+| 13 | `counter_evidence_assessment` | object | 反対材料の探索・評価結果 |
+| 14 | `sources` | array | 情報源、2件以上8件以下 |
+| 15 | `primary_source_status` | string | 一次情報の利用状況を表す固定列挙 |
+| 16 | `model_info` | object | 固定モデル情報契約 |
+| 17 | `analysis_executed_at` | string | UTCの固定日時表記 |
 
 `schema_version` が分析契約バージョンを表し、`model_info.prompt_version`
 がプロンプトまたは分析手順のバージョンを表す。
@@ -276,6 +278,11 @@ probability_gap = Y - M
 してはならない。`confidence: "low"` の `completed` ではなく、
 `error_code: "insufficient_evidence"` の `error` とする。
 
+ただし、反対材料を所定の手順で探索・評価した結果、信頼できる反対材料
+を確認できなかった場合は、`counter_evidence` を空配列にできる。
+単に探索しなかった場合や、探索結果を評価していない場合は
+`completed` にできない。
+
 `low` は最低条件を満たしたうえで不確実性が高い結果にだけ使用する。
 
 `confidence` の意味は次に固定する。具体的な判定手順は
@@ -291,9 +298,9 @@ probability_gap = Y - M
 許可しない。
 
 - `evidence`: 1件以上5件以下
-- `counter_evidence`: 1件以上5件以下
-- 両方とも空配列を禁止
-- 根拠だけ、または反対材料だけの `completed` を禁止
+- `counter_evidence`: 0件以上5件以下
+- `evidence` の空配列を禁止
+- `counter_evidence` の空配列は探索・評価済みの場合だけ許可
 
 各要素は次の固定キー順とする。
 
@@ -315,12 +322,39 @@ probability_gap = Y - M
 配列順は、`source_ids` の列を情報源順の数値列として比較し、その後に
 正規化済み `text` を比較する安定ソートで固定する。
 
+### 8.1 反対材料の探索・評価
+
+`counter_evidence_assessment` は常に必須のobjectとし、次の固定キー順
+とする。
+
+| 順序 | キー | JSON型 | 制約 |
+| ---: | --- | --- | --- |
+| 1 | `status` | string | `found` または `searched_not_found` |
+| 2 | `summary` | string | 前後空白除去後1文字以上500文字以下 |
+
+次の組合せだけを許可する。
+
+- `counter_evidence` が1件以上: `status` は `found`
+- `counter_evidence` が0件: `status` は `searched_not_found`
+
+`found` の `summary` は、最も重要な反対材料と、その材料が確率または
+信頼度へ与えた影響を要約する。
+
+`searched_not_found` の場合、`summary` には反対仮説、確認した論点・
+検索範囲、および「信頼できる有力な反対材料を確認できなかった」という
+結論を記録する。また `model_info.tools_used` に `web_search` が含まれ
+なければならない。
+
+検索を行わないまま空配列にすること、検索スニペットだけを見て
+`searched_not_found` とすること、弱い記事や無関係な記述を契約充足の
+ために `counter_evidence` へ入れることを禁止する。
+
 ## 9. 情報源契約
 
 ### 9.1 件数と情報源オブジェクト
 
 `sources` は2件以上8件以下とし、正規化URLが異なる情報源を最低2件
-要求する。少なくとも1件は `source_type: "primary"` とする。
+要求する。
 
 各要素は次の固定キー順とする。
 
@@ -354,9 +388,37 @@ probability_gap = Y - M
 `counter_evidence[].source_ids` は `counter` または `both` の情報源だけ
 を参照できる。全情報源は少なくとも1件の根拠または反対材料から参照
 されなければならない。件数条件を満たすためだけの未使用情報源を禁止
-する。
+する。`counter_evidence` が空の場合はstanceが `counter` または `both`
+の情報源を禁止する。
 
-### 9.2 URL正規化と重複
+### 9.2 一次情報の利用条件
+
+`primary_source_status` は次の固定列挙とする。
+
+| 値 | 意味 | 情報源条件 |
+| --- | --- | --- |
+| `used` | 有効な一次情報を利用した | `sources` にprimaryが1件以上 |
+| `not_available` | 一次情報が合理的に想定されるが、分析時点で取得・確認できなかった | primaryは0件、secondaryは異なる発行元から2件以上 |
+| `not_applicable` | 将来予測や未公表事象など、分析対象に対応する一次情報が合理的に存在しない | primaryは0件、secondaryは異なる発行元から2件以上 |
+
+primaryが1件以上ある場合は必ず `used` とする。`not_available` と
+`not_applicable` の使い分けは、`model_info.prompt_version` が指す
+分析手順で市場の性質と探索結果から判定する。状態値自体が、primaryを
+利用しなかった理由の固定分類となる。
+
+`not_available` は一次情報を実際に探索した結果を表すため、
+`model_info.tools_used` に `web_search` が含まれなければならない。
+
+secondaryの「異なる発行元」は、`publisher` をUnicode NFKC正規化し、
+連続空白を1文字へ畳み、casefoldした比較値が異なることとする。
+同じ発行元の複数記事だけで最低2件を満たさない。
+
+primaryが合理的に存在するのに探索しなかった場合や、有効なprimaryを
+確認済みなのに使用しなかった場合は `completed` にできない。一次情報
+の有無を判断できず、secondaryの独立性も満たせない場合は
+`insufficient_evidence` とする。
+
+### 9.3 URL正規化と重複
 
 `canonical_url` は次の順序で生成する。
 
@@ -379,7 +441,7 @@ URLへ到達した場合も重複とする。重複排除後に最低件数を�
 とする。その後 `S1`、`S2` の連番を割り当て、根拠・反対材料の参照IDも
 割当後のIDへ統一する。
 
-### 9.3 検索スニペットと本文
+### 9.4 検索スニペットと本文
 
 検索結果スニペットだけを情報源として認めない。リンク先本文、公開API、
 公式文書など、内容を実際に取得して妥当性を確認したものだけを
@@ -475,6 +537,19 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 | `rate_limited` | `external_dependency` | true | `search`, `source_retrieval`, `model` |
 | `source_validation_failed` | `evidence` | false | `source_retrieval`, `source_validation` |
 
+`retryable` は、同じ分析入力、同じ情報時点、同じ検索設定、同じモデル
+設定、同じ `prompt_version` のまま再試行しても、一時的要因の解消に
+より成功する合理的な可能性があるかを表す。自動再試行の指示や、
+利用者による状態リセット権限そのものではない。
+
+- `true`: timeout、rate limit、一時的な外部障害など、同一条件の再試行で
+  改善し得る
+- `false`: 情報源不足や恒久的な検証失敗など、同一条件の再試行だけでは
+  改善を期待しない
+
+`retryable: true` でも既定では自動再試行しない。外部料金と無限再試行を
+避けるため、状態リセットには利用者の明示指定を必要とする。
+
 この列挙に該当しない設定不正、入力不正、結果ファイル不正、内部不変条件
 違反、シリアライズ失敗、保存失敗は市場単位の `error` に変換せず、
 ファイル全体の処理失敗とする。
@@ -487,7 +562,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 | --- | --- | --- |
 | `pending` | `completed` | 全completed契約を満たす |
 | `pending` | `error` | 市場単位の固定エラーに分類できる |
-| `error` | `pending` | 利用者が対象市場の再試行を明示した場合だけ |
+| `error` | `pending` | 13.3の状態リセット条件を満たす場合だけ |
 
 `pending → pending`、`completed → completed`、`error → error` は、
 未処理要素を内容変更せず次の全体スナップショットへ引き継ぐ場合だけ
@@ -506,14 +581,34 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 `completed` は同一スナップショットに対する終端状態とする。再分析は
 既存結果を上書きせず、実行ID付き別成果物の契約を設計してから行う。
 
-`error` の再試行は、まず選択した要素を共通4キーだけの `pending` へ
-戻し、ファイル全体を原子的に保存する。その後の別処理で
+### 13.3 `error → pending` の状態リセット
+
+`retryable` と利用者の状態リセット権限を分離する。
+
+- `retryable: true`: 利用者が対象市場を明示すれば、同一条件でも
+  `pending` へ戻せる
+- `retryable: false`: 同一条件のまま `pending` へ戻すことを禁止する
+- `retryable: false` でも、次のいずれかの条件変更を利用者が明示した
+  場合は `pending` へ戻せる
+  - 時間経過により新しい情報源が公開・取得可能になった
+  - 検索範囲、検索プロバイダ、情報源取得方法を変更した
+  - provider、model、model_version、temperature、seedを変更した
+  - `prompt_version` を変更した
+  - 利用者が新しい検証可能な根拠を追加した
+
+状態リセットの承認理由と変更条件は処理ログの責務とし、共通4キーだけの
+`pending` へ追加しない。監査ログの保存形式は外部AI実装の別設計で
+固定する。ログ契約が未実装の段階では、`retryable: false` の状態
+リセット機能を実装しない。
+
+再試行は、まず選択した要素を共通4キーだけの `pending` へ戻し、
+ファイル全体を原子的に保存する。その後の別処理で
 `pending → completed` または `pending → error` とする。これにより
 直接遷移を禁止し、失敗項目が残った状態と新しい試行を混同しない。
 
-### 13.3 遷移時のキー
+### 13.4 遷移時のキー
 
-- `pending → completed`: completedの15キーだけを新規構築
+- `pending → completed`: completedの17キーだけを新規構築
 - `pending → error`: errorの12キーだけを新規構築
 - `error → pending`: error固有8キーをすべて除去
 - 状態を維持する要素: キー、値、配列順を変更しない
@@ -557,7 +652,8 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - `error`: 内容をそのまま保持し、既定では自動再試行しない
 
 再試行可能な `error` であっても、無限再試行や意図しない外部料金を
-避けるため利用者の明示選択を必要とする。
+避けるため利用者の明示選択を必要とする。`retryable: false` の状態
+リセットは13.3の条件変更と処理ログ要件を満たす場合だけ許可する。
 
 ### 15.2 部分成功
 
@@ -667,6 +763,10 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
       ]
     }
   ],
+  "counter_evidence_assessment": {
+    "status": "found",
+    "summary": "計画遅延の可能性を示す検証済み報道を反対材料として採用した"
+  },
   "sources": [
     {
       "source_id": "S1",
@@ -695,6 +795,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
       "relevance": "公式計画の遅延要因を検討した報道"
     }
   ],
+  "primary_source_status": "used",
   "model_info": {
     "provider": "example-provider",
     "model": "example-model",
@@ -757,7 +858,11 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 ### 19.2 状態遷移
 
 - `pending → completed` と `pending → error` を受理
-- 明示的な `error → pending` を受理し、error固有キーを除去
+- `retryable: true` の明示的な `error → pending` を受理し、
+  error固有キーを除去
+- `retryable: false` の同一条件リセットを拒否
+- `retryable: false` でも条件変更と処理ログ要件を満たす手動リセットを
+  受理
 - `completed → pending`、`completed → error`、直接の
   `error → completed` を拒否
 - 状態維持要素が内容変更されないこと
@@ -772,7 +877,11 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - NO確率と価格差がYES確率から正しく派生
 - 差が `0.05`、`-0.05` の結論境界
 - 根拠、反対材料、情報源の最小・最大件数
-- 根拠だけ、反対材料だけのcompletedを拒否
+- `counter_evidence` が空のとき `searched_not_found` とweb検索実施を要求
+- `counter_evidence` があるときassessmentのstatusを `found` に限定
+- 反対材料を探索していない空配列を拒否
+- 反対材料が空のときcounter/both stanceの情報源を拒否
+- 根拠のないcompletedを拒否
 - 正規化後に重複する根拠・反対材料を拒否
 - source ID参照、順序、重複を検証
 - `insufficient_evidence` では確率を保存しないこと
@@ -783,7 +892,12 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - scheme・host、既定port、fragment、path、queryの正規化
 - 追跡query除去と残存queryの安定ソート
 - 同一canonical URLの重複を拒否
-- primaryが最低1件、全体が2件以上
+- 全体が2件以上であること
+- primary使用時は `primary_source_status == "used"` を要求
+- `not_available` と `not_applicable` ではprimaryを禁止し、異なる
+  発行元のsecondaryを2件以上要求
+- `not_available` ではweb検索実施を要求
+- 一次情報の状態値とsourcesの組合せ不整合を拒否
 - スニペットだけの情報源を拒否
 - 公開日時のdatetime、date、unknownと値の組合せ
 - 情報源ソート後の `S1` 連番と参照ID再割当
@@ -796,6 +910,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - web_searchとsearch_providerの整合
 - 7種類のエラーコードだけを受理
 - コード、分類、retryable、失敗段階の組合せ
+- retryableが同一条件での再試行可能性だけを表すこと
 - errorでcompleted固有キーと部分結果を拒否
 - 生例外、スタックトレース、秘密情報を結果へ含めない
 
@@ -841,6 +956,11 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - 確率、丸め、合計、価格差、結論境界が機械的に検証できる
 - 根拠、反対材料、情報源、モデル情報、エラー列挙が固定されている
 - 情報不足を低信頼completedではなくerrorとする境界が明確である
+- 一次情報が存在しない市場でも、独立secondaryと理由分類により
+  completedを構築できる
+- 反対材料を探索済みで確認できなかった場合に、捏造せず空配列を
+  記録できる
+- retryableと利用者による状態リセット権限が分離されている
 - 決定性と再現性が別要件として定義されている
 - `2.0`への更新理由と既存`1.0`移行方針が明確である
 - 再実行、再試行、部分成功、中断、原子的保存が矛盾しない
