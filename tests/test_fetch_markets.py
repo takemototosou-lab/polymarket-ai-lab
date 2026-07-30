@@ -1,6 +1,10 @@
+import codecs
+import csv
 import json
+import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import fetch_markets
 import requests
@@ -27,6 +31,32 @@ def make_market(**overrides):
     }
     market.update(overrides)
     return market
+
+
+def make_candidate(market_id, volume, token_ids):
+    return {
+        "market_id": market_id,
+        "question": f"市場 {market_id}",
+        "token_ids": token_ids,
+        "volume": float(volume),
+        "liquidity": 8_000.0,
+        "end_date": "2026-12-31T00:00:00Z",
+        "url": f"https://polymarket.com/event/market-{market_id}",
+    }
+
+
+def make_csv_row(question):
+    return {
+        "取得日時": "2026-07-30T20:00:00+09:00",
+        "市場ID": "123",
+        "市場": question,
+        "YES価格": 0.42,
+        "NO価格": 0.58,
+        "出来高": 20_000.0,
+        "流動性": 8_000.0,
+        "締切日": "2026-12-31T00:00:00Z",
+        "URL": "https://polymarket.com/event/sample-event",
+    }
 
 
 class FakeResponse:
@@ -221,6 +251,159 @@ class ApiClientTests(unittest.TestCase):
                 session, ["yes-token", "no-token"], batch_size=2
             ),
         )
+
+
+class CsvOutputTests(unittest.TestCase):
+    def test_deduplicates_sorts_and_requires_both_prices(self):
+        fetched_at = datetime(
+            2026,
+            7,
+            30,
+            20,
+            0,
+            tzinfo=timezone(timedelta(hours=9), "JST"),
+        )
+
+        rows = fetch_markets.select_rows(
+            [
+                make_candidate("1", 20_000, ("y1", "n1")),
+                make_candidate("1", 20_000, ("y1", "n1")),
+                make_candidate("2", 30_000, ("y2", "n2")),
+                make_candidate("3", 40_000, ("y3", "n3")),
+            ],
+            {
+                "y1": 0.4,
+                "n1": 0.6,
+                "y2": 0.7,
+                "n2": 0.3,
+                "y3": 0.2,
+            },
+            fetched_at,
+        )
+
+        self.assertEqual(["2", "1"], [row["市場ID"] for row in rows])
+
+    def test_limits_rows_to_requested_count(self):
+        candidates = [
+            make_candidate(str(index), 20_000 + index, (f"y{index}", f"n{index}"))
+            for index in range(5)
+        ]
+        prices = {
+            token_id: price
+            for index in range(5)
+            for token_id, price in (
+                (f"y{index}", 0.4),
+                (f"n{index}", 0.6),
+            )
+        }
+
+        rows = fetch_markets.select_rows(
+            candidates,
+            prices,
+            datetime(2026, 7, 30, tzinfo=timezone.utc),
+            limit=3,
+        )
+
+        self.assertEqual(3, len(rows))
+        self.assertEqual(["4", "3", "2"], [row["市場ID"] for row in rows])
+
+    def test_writes_utf8_bom_and_preserves_non_ascii_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "markets.csv"
+
+            fetch_markets.write_csv(
+                [make_csv_row("日本語 – café")],
+                path,
+            )
+
+            raw = path.read_bytes()
+            self.assertTrue(raw.startswith(codecs.BOM_UTF8))
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual("日本語 – café", rows[0]["市場"])
+            self.assertEqual(list(fetch_markets.CSV_FIELDS), list(rows[0]))
+
+    def test_output_path_does_not_overwrite_same_minute_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            fetched_at = datetime(
+                2026, 7, 30, 20, 0, 45, tzinfo=timezone.utc
+            )
+
+            first = fetch_markets.choose_output_path(data_dir, fetched_at)
+            first.touch()
+            second = fetch_markets.choose_output_path(data_dir, fetched_at)
+            second.touch()
+            third = fetch_markets.choose_output_path(data_dir, fetched_at)
+
+            self.assertEqual("markets_2026-07-30_2000.csv", first.name)
+            self.assertEqual("markets_2026-07-30_2000_45.csv", second.name)
+            self.assertEqual("markets_2026-07-30_2000_45_1.csv", third.name)
+            self.assertFalse(third.exists())
+
+
+class CollectionWorkflowTests(unittest.TestCase):
+    def test_collect_snapshot_writes_rows_from_public_api_payloads(self):
+        second_market = make_market(
+            id="456",
+            question="Second market?",
+            volumeNum=30_000,
+            slug="second-market",
+            events=[{"slug": "second-event", "tags": []}],
+            clobTokenIds=json.dumps(["yes-2", "no-2"]),
+        )
+        session = FakeSession(
+            [
+                FakeResponse(200, [{"tags": "1,82"}]),
+                FakeResponse(
+                    200,
+                    {"markets": [make_market(), second_market]},
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "yes-token": "0.42",
+                        "no-token": "0.58",
+                        "yes-2": "0.7",
+                        "no-2": "0.3",
+                    },
+                ),
+            ]
+        )
+        fetched_at = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path, count = fetch_markets.collect_snapshot(
+                session, fetched_at, Path(directory)
+            )
+
+            self.assertEqual(2, count)
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(["456", "123"], [row["市場ID"] for row in rows])
+
+    def test_collect_snapshot_rejects_zero_eligible_markets(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, [{"tags": "1,82"}]),
+                FakeResponse(
+                    200,
+                    {"markets": [make_market(active=False)]},
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RuntimeError, "条件を満たす市場候補が0件"
+            ):
+                fetch_markets.collect_snapshot(
+                    session,
+                    datetime(2026, 7, 30, tzinfo=timezone.utc),
+                    Path(directory),
+                )
+
+            self.assertEqual([], list(Path(directory).glob("*.csv")))
 
 
 if __name__ == "__main__":

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +20,20 @@ CLOB_BASE = "https://clob.polymarket.com"
 MIN_VOLUME = 10_000.0
 MIN_LIQUIDITY = 5_000.0
 SPORTS_FIELDS = ("gameId", "gameStartTime", "sportsMarketType")
+OUTPUT_LIMIT = 100
+CANDIDATE_TARGET = 150
+JST = timezone(timedelta(hours=9), "JST")
+CSV_FIELDS = (
+    "取得日時",
+    "市場ID",
+    "市場",
+    "YES価格",
+    "NO価格",
+    "出来高",
+    "流動性",
+    "締切日",
+    "URL",
+)
 
 
 def parse_json_list(value: object) -> list[str]:
@@ -255,3 +271,141 @@ def fetch_midpoints(
             )
         )
     return result
+
+
+def select_rows(
+    candidates: list[dict[str, Any]],
+    midpoints: dict[str, float],
+    fetched_at: datetime,
+    limit: int = OUTPUT_LIMIT,
+) -> list[dict[str, object]]:
+    """候補を重複排除・出来高順でCSV行へ変換する。"""
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for candidate in sorted(
+        candidates, key=lambda item: item["volume"], reverse=True
+    ):
+        market_id = str(candidate["market_id"])
+        if market_id in seen:
+            continue
+        yes_token, no_token = candidate["token_ids"]
+        if yes_token not in midpoints or no_token not in midpoints:
+            continue
+        seen.add(market_id)
+        rows.append(
+            {
+                "取得日時": fetched_at.isoformat(),
+                "市場ID": market_id,
+                "市場": candidate["question"],
+                "YES価格": midpoints[yes_token],
+                "NO価格": midpoints[no_token],
+                "出来高": candidate["volume"],
+                "流動性": candidate["liquidity"],
+                "締切日": candidate["end_date"],
+                "URL": candidate["url"],
+            }
+        )
+        if len(rows) == limit:
+            break
+    return rows
+
+
+def choose_output_path(data_dir: Path, fetched_at: datetime) -> Path:
+    """同じ分の既存スナップショットを上書きしないパスを返す。"""
+    stem = fetched_at.strftime("markets_%Y-%m-%d_%H%M")
+    path = data_dir / f"{stem}.csv"
+    if not path.exists():
+        return path
+    with_seconds = data_dir / f"{stem}_{fetched_at:%S}.csv"
+    if not with_seconds.exists():
+        return with_seconds
+    suffix = 1
+    while (data_dir / f"{stem}_{fetched_at:%S}_{suffix}.csv").exists():
+        suffix += 1
+    return data_dir / f"{stem}_{fetched_at:%S}_{suffix}.csv"
+
+
+def write_csv(rows: list[dict[str, object]], path: Path) -> None:
+    """CSVをUTF-8 BOM付きで新規保存する。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def collect_candidates(
+    session: requests.Session, fetched_at: datetime
+) -> list[dict[str, Any]]:
+    """Gamma APIから条件を満たす候補を収集する。"""
+    sport_tag_ids = fetch_sport_tag_ids(session)
+    candidates: list[dict[str, Any]] = []
+    for page in iter_market_pages(session, fetched_at):
+        for market in page:
+            if not isinstance(market, dict):
+                continue
+            candidate = normalize_market(
+                market, sport_tag_ids, fetched_at
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        if len(candidates) >= CANDIDATE_TARGET:
+            break
+    return candidates
+
+
+def collect_snapshot(
+    session: requests.Session,
+    fetched_at: datetime,
+    data_dir: Path,
+) -> tuple[Path, int]:
+    """市場と価格を収集し、CSVを保存する。"""
+    candidates = collect_candidates(session, fetched_at)
+    if not candidates:
+        raise RuntimeError("条件を満たす市場候補が0件です")
+    token_ids = list(
+        dict.fromkeys(
+            token_id
+            for candidate in candidates
+            for token_id in candidate["token_ids"]
+        )
+    )
+    midpoints = fetch_midpoints(session, token_ids)
+    rows = select_rows(candidates, midpoints, fetched_at)
+    if not rows:
+        raise RuntimeError("有効なCLOB価格を持つ市場が0件です")
+    output_path = choose_output_path(data_dir, fetched_at)
+    write_csv(rows, output_path)
+    return output_path, len(rows)
+
+
+def main() -> int:
+    """コマンドライン実行入口。"""
+    fetched_at = datetime.now(JST)
+    session = requests.Session()
+    session.headers["User-Agent"] = "polymarket-ai-lab/1.0"
+    try:
+        output_path, count = collect_snapshot(
+            session,
+            fetched_at,
+            Path(__file__).resolve().parent / "data",
+        )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        requests.RequestException,
+    ) as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
+    print(f"{output_path} に {count} 件保存しました")
+    if count < OUTPUT_LIMIT:
+        print(
+            f"警告: 目標{OUTPUT_LIMIT}件に達しませんでした",
+            file=sys.stderr,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
