@@ -189,3 +189,17 @@ def load_analysis_inputs(path: Path) -> list[dict[str, object]]:
         records.append(item)
 
     return records
+
+
+def build_pending_results(
+    records: list[dict[str, object]],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "schema_version": SCHEMA_VERSION,
+            "market_id": record["市場ID"],
+            "analysis_reference_time": record["分析基準日時"],
+            "status": "pending",
+        }
+        for record in records
+    ]

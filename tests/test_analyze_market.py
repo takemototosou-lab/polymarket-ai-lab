@@ -299,5 +299,52 @@ class InputValidationTests(unittest.TestCase):
                         analyze_market.load_analysis_inputs(path)
 
 
+class PendingResultTests(unittest.TestCase):
+    def test_builds_one_pending_result_per_input_in_order(self):
+        records = [
+            make_input_record(market_id="2"),
+            make_input_record(market_id="1"),
+        ]
+
+        results = analyze_market.build_pending_results(records)
+
+        self.assertEqual(["2", "1"], [item["market_id"] for item in results])
+        self.assertEqual(
+            [REFERENCE_TIME, REFERENCE_TIME],
+            [item["analysis_reference_time"] for item in results],
+        )
+        self.assertEqual(
+            ["pending", "pending"],
+            [item["status"] for item in results],
+        )
+
+    def test_uses_only_code_schema_version_for_every_result(self):
+        records = [
+            {
+                **make_input_record(market_id="1"),
+                "schema_version": "999.0",
+            },
+            {
+                **make_input_record(market_id="2"),
+                "schema_version": None,
+            },
+        ]
+
+        results = analyze_market.build_pending_results(records)
+
+        self.assertEqual("1.0", analyze_market.SCHEMA_VERSION)
+        self.assertEqual(
+            {"1.0"},
+            {item["schema_version"] for item in results},
+        )
+        self.assertNotEqual(
+            records[0]["schema_version"],
+            results[0]["schema_version"],
+        )
+
+    def test_empty_input_produces_empty_result_list(self):
+        self.assertEqual([], analyze_market.build_pending_results([]))
+
+
 if __name__ == "__main__":
     unittest.main()
