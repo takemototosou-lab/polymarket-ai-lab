@@ -1,5 +1,12 @@
+import codecs
+import csv
+import io
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
 
 import select_candidates
 
@@ -34,6 +41,30 @@ def make_row(
             else url
         ),
     }
+
+
+def write_market_csv(
+    data_dir,
+    rows,
+    name="markets_2026-07-30_1200.csv",
+    fieldnames=None,
+):
+    path = Path(data_dir) / name
+    fields = (
+        list(select_candidates.INPUT_FIELDS)
+        if fieldnames is None
+        else fieldnames
+    )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fields,
+            lineterminator="\r\n",
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
 
 
 class NormalizationTests(unittest.TestCase):
@@ -229,6 +260,190 @@ class SelectionTests(unittest.TestCase):
             ],
             list(dict.fromkeys(item.reason for item in selected)),
         )
+
+    def test_limits_output_to_ten(self):
+        rows = [
+            make_row(
+                market_id=str(index),
+                volume=str(1000 - index),
+                url=f"https://polymarket.com/event/theme-{index}",
+            )
+            for index in range(12)
+        ]
+
+        selected = select_candidates.select_candidates(
+            select_candidates.prepare_candidates(rows, FETCHED_AT)
+        )
+
+        self.assertEqual(10, len(selected))
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_finds_latest_market_csv_by_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(
+                data_dir,
+                [make_row()],
+                name="markets_2026-07-29_2359.csv",
+            )
+            latest = write_market_csv(
+                data_dir,
+                [make_row()],
+                name="markets_2026-07-30_1200.csv",
+            )
+            (data_dir / "candidates_2099-01-01_0000.csv").touch()
+
+            self.assertEqual(
+                latest,
+                select_candidates.find_latest_markets_csv(data_dir),
+            )
+
+    def test_zero_candidates_writes_header_only_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_market_csv(
+                data_dir,
+                [make_row(yes="0.01")],
+            )
+            source_before = source.read_bytes()
+
+            output, count = select_candidates.run(data_dir)
+
+            self.assertEqual(0, count)
+            self.assertTrue(output.read_bytes().startswith(codecs.BOM_UTF8))
+            with output.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(
+                    list(select_candidates.OUTPUT_FIELDS),
+                    reader.fieldnames,
+                )
+                self.assertEqual([], list(reader))
+            self.assertEqual(source_before, source.read_bytes())
+
+    def test_rejects_inconsistent_acquisition_timestamps_without_output(self):
+        rows = [
+            make_row(
+                market_id="1",
+                fetched_at="2026-07-30T12:00:00+09:00",
+            ),
+            make_row(
+                market_id="2",
+                fetched_at="2026-07-30T03:00:00+00:00",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(data_dir, rows)
+
+            with self.assertRaisesRegex(ValueError, "取得日時が不統一"):
+                select_candidates.run(data_dir)
+
+            self.assertEqual(
+                [],
+                list(data_dir.glob("candidates_*.csv")),
+            )
+
+    def test_rejects_invalid_input_without_overwriting_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(
+                data_dir,
+                [make_row(volume="not-a-number")],
+            )
+            existing = (
+                data_dir / "candidates_2026-07-30_1200.csv"
+            )
+            existing.write_bytes(b"keep-this")
+
+            with self.assertRaisesRegex(ValueError, "出来高"):
+                select_candidates.run(data_dir)
+
+            self.assertEqual(b"keep-this", existing.read_bytes())
+
+    def test_rejects_missing_required_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            fields = [
+                field
+                for field in select_candidates.INPUT_FIELDS
+                if field != "市場ID"
+            ]
+            write_market_csv(
+                data_dir,
+                [make_row()],
+                fieldnames=fields,
+            )
+
+            with self.assertRaisesRegex(ValueError, "必須列"):
+                select_candidates.run(data_dir)
+
+    def test_rerun_produces_byte_identical_output(self):
+        rows = [
+            make_row(
+                market_id="2",
+                question="同順位B",
+                volume="100",
+            ),
+            make_row(
+                market_id="1",
+                question="同順位A",
+                volume="100",
+            ),
+            make_row(
+                market_id="1",
+                question="同順位A",
+                volume="100",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(data_dir, rows)
+
+            first_path, first_count = select_candidates.run(data_dir)
+            first_bytes = first_path.read_bytes()
+            second_path, second_count = select_candidates.run(data_dir)
+
+            self.assertEqual(2, first_count)
+            self.assertEqual(first_count, second_count)
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(first_bytes, second_path.read_bytes())
+
+    def test_main_reports_zero_candidates_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(data_dir, [make_row(yes="0.01")])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch.object(select_candidates, "DATA_DIR", data_dir),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = select_candidates.main()
+
+            self.assertEqual(0, exit_code)
+            self.assertIn("候補0件", stdout.getvalue())
+            self.assertEqual("", stderr.getvalue())
+
+    def test_main_reports_invalid_input_as_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_market_csv(data_dir, [make_row(fetched_at="no-date")])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch.object(select_candidates, "DATA_DIR", data_dir),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = select_candidates.main()
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("エラー:", stderr.getvalue())
 
 
 if __name__ == "__main__":

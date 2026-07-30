@@ -2,13 +2,35 @@
 
 from __future__ import annotations
 
+import csv
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+
+INPUT_FIELDS = (
+    "取得日時",
+    "市場ID",
+    "市場",
+    "YES価格",
+    "NO価格",
+    "出来高",
+    "流動性",
+    "締切日",
+    "URL",
+)
+OUTPUT_FIELDS = INPUT_FIELDS + (
+    "カテゴリ",
+    "締切までの日数",
+    "選定理由",
+)
+NUMERIC_FIELDS = ("YES価格", "NO価格", "出来高", "流動性")
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 CATEGORY_RULES = (
     (
@@ -306,3 +328,148 @@ def select_candidates(
             if len(selected) == limit:
                 return selected
     return selected
+
+
+def find_latest_markets_csv(data_dir: Path) -> Path:
+    """ファイル名順で最新の市場スナップショットを返す。"""
+    paths = sorted(
+        (
+            path
+            for path in data_dir.glob("markets_*.csv")
+            if path.is_file()
+        ),
+        key=lambda path: path.name,
+    )
+    if not paths:
+        raise ValueError("入力となるmarkets CSVがありません")
+    return paths[-1]
+
+
+def _validated_decimal(
+    value: object,
+    field: str,
+    row_number: int,
+) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{row_number}行目の{field}が不正です"
+        ) from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{row_number}行目の{field}が不正です")
+    return parsed
+
+
+def _validated_datetime(
+    value: object,
+    field: str,
+    row_number: int,
+) -> datetime:
+    try:
+        return parse_iso_datetime(value)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{row_number}行目の{field}が不正です"
+        ) from exc
+
+
+def read_market_csv(
+    path: Path,
+) -> tuple[list[dict[str, str]], datetime]:
+    """市場CSV全体を検証し、行と統一取得日時を返す。"""
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        missing = [
+            field for field in INPUT_FIELDS if field not in fieldnames
+        ]
+        if missing:
+            raise ValueError(
+                f"必須列が不足しています: {', '.join(missing)}"
+            )
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError("入力CSVに市場データがありません")
+
+    fetched_values = {row["取得日時"] for row in rows}
+    if len(fetched_values) != 1:
+        raise ValueError("元CSV内の取得日時が不統一です")
+
+    fetched_at = _validated_datetime(
+        rows[0]["取得日時"],
+        "取得日時",
+        2,
+    )
+    for row_number, row in enumerate(rows, start=2):
+        market_id = row["市場ID"]
+        if not isinstance(market_id, str) or not market_id.strip():
+            raise ValueError(f"{row_number}行目の市場IDが空です")
+        for field in NUMERIC_FIELDS:
+            _validated_decimal(row[field], field, row_number)
+        _validated_datetime(row["締切日"], "締切日", row_number)
+    return rows, fetched_at
+
+
+def candidate_output_path(
+    data_dir: Path,
+    fetched_at: datetime,
+) -> Path:
+    """入力取得日時から決定的な候補CSVパスを返す。"""
+    return data_dir / fetched_at.strftime(
+        "candidates_%Y-%m-%d_%H%M.csv"
+    )
+
+
+def write_candidate_csv(
+    path: Path,
+    selected: list[Candidate],
+) -> None:
+    """候補をUTF-8 BOM付き、固定列順、固定改行で上書き保存する。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=OUTPUT_FIELDS,
+            lineterminator="\r\n",
+        )
+        writer.writeheader()
+        for item in selected:
+            writer.writerow(
+                {
+                    **{
+                        field: item.source[field]
+                        for field in INPUT_FIELDS
+                    },
+                    "カテゴリ": item.category,
+                    "締切までの日数": item.days_text,
+                    "選定理由": item.reason,
+                }
+            )
+
+
+def run(data_dir: Path) -> tuple[Path, int]:
+    """最新市場CSVを読み、候補CSVを生成する。"""
+    input_path = find_latest_markets_csv(data_dir)
+    rows, fetched_at = read_market_csv(input_path)
+    prepared = prepare_candidates(rows, fetched_at)
+    selected = select_candidates(prepared)
+    output_path = candidate_output_path(data_dir, fetched_at)
+    write_candidate_csv(output_path, selected)
+    return output_path, len(selected)
+
+
+def main() -> int:
+    """コマンドライン実行入口。"""
+    try:
+        output_path, count = run(DATA_DIR)
+    except (csv.Error, OSError, UnicodeError, ValueError) as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
+    print(f"{output_path} に候補{count}件を保存しました")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
