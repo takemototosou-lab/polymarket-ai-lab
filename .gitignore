@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 data/markets_*.csv
 data/candidates_*.csv
+data/analysis_input_*.json

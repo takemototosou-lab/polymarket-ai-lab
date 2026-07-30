@@ -1,6 +1,9 @@
 import csv
 import json
+import os
 import re
+import sys
+import tempfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -54,6 +57,8 @@ SOURCE_KEY_BY_JSON_KEY = {
     **{key: key for key in JSON_KEYS},
     "分析基準日時": "取得日時",
 }
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
 def canonical_json_number(raw_value: str, *, field: str, row_number: int) -> str:
@@ -178,3 +183,61 @@ def serialize_analysis_input(records: list[dict[str, str]]) -> bytes:
         lines.append(f"  }}{object_comma}")
     lines.append("]")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def atomic_write(path: Path, payload: bytes) -> None:
+    descriptor: int | None = None
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written == 0:
+                raise OSError("一時ファイルへ書き込めません")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        raise
+
+
+def run(data_dir: Path) -> tuple[Path, int]:
+    input_path = find_latest_candidate_csv(data_dir)
+    output_path = output_path_for(input_path)
+    records = read_analysis_records(input_path)
+    payload = serialize_analysis_input(records)
+    atomic_write(output_path, payload)
+    return output_path, len(records)
+
+
+def main() -> int:
+    try:
+        output_path, count = run(DATA_DIR)
+    except (csv.Error, OSError, UnicodeError, ValueError) as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{output_path} に分析入力{count}件を保存しました")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

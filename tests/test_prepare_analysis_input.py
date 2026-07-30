@@ -1,9 +1,12 @@
 import codecs
 import csv
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import prepare_analysis_input
 
@@ -274,6 +277,92 @@ class SerializationTests(unittest.TestCase):
             ["2", "1"],
             [item["市場ID"] for item in json.loads(first)],
         )
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_run_atomically_replaces_output_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_candidate_csv(data_dir, [make_candidate_row()])
+            source_before = source.read_bytes()
+            output = data_dir / "analysis_input_2026-07-30_2204.json"
+            output.write_bytes(b"old")
+
+            first_path, first_count = prepare_analysis_input.run(data_dir)
+            first_bytes = first_path.read_bytes()
+            second_path, second_count = prepare_analysis_input.run(data_dir)
+
+            self.assertEqual((1, 1), (first_count, second_count))
+            self.assertEqual(output, first_path)
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(first_bytes, second_path.read_bytes())
+            self.assertEqual(source_before, source.read_bytes())
+
+    def test_write_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_input_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                prepare_analysis_input.os,
+                "write",
+                side_effect=OSError("write failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "write failed"):
+                    prepare_analysis_input.atomic_write(path, b"new")
+
+            self.assertEqual(b"old", path.read_bytes())
+
+    def test_replace_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_input_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                prepare_analysis_input.os,
+                "replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    prepare_analysis_input.atomic_write(path, b"new")
+
+            self.assertEqual(b"old", path.read_bytes())
+            self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    def test_invalid_input_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_candidate_csv(
+                data_dir,
+                [make_candidate_row(**{"YES価格": "NaN"})],
+            )
+            output = data_dir / "analysis_input_2026-07-30_2204.json"
+            output.write_bytes(b"old")
+
+            with self.assertRaisesRegex(ValueError, "YES価格"):
+                prepare_analysis_input.run(data_dir)
+
+            self.assertEqual(b"old", output.read_bytes())
+
+    def test_main_reports_zero_records_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_candidate_csv(data_dir, [])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch.object(prepare_analysis_input, "DATA_DIR", data_dir),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = prepare_analysis_input.main()
+
+            output = data_dir / "analysis_input_2026-07-30_2204.json"
+            self.assertEqual(0, exit_code)
+            self.assertEqual(b"[]\n", output.read_bytes())
+            self.assertIn("分析入力0件", stdout.getvalue())
+            self.assertEqual("", stderr.getvalue())
 
 
 if __name__ == "__main__":
