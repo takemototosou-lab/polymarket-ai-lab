@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import sys
+import time
+from collections.abc import Callable, Iterator
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
+import requests
 
+
+GAMMA_BASE = "https://gamma-api.polymarket.com"
+CLOB_BASE = "https://clob.polymarket.com"
 MIN_VOLUME = 10_000.0
 MIN_LIQUIDITY = 5_000.0
 SPORTS_FIELDS = ("gameId", "gameStartTime", "sportsMarketType")
@@ -103,3 +110,148 @@ def normalize_market(
         }
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def request_json(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    **kwargs: Any,
+) -> object:
+    """一時的な通信障害を再試行し、JSON応答を返す。"""
+    for attempt in range(3):
+        try:
+            response = session.request(
+                method, url, timeout=20, **kwargs
+            )
+            response.raise_for_status()
+            return response.json()
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.HTTPError,
+        ) as exc:
+            response = getattr(exc, "response", None)
+            status = response.status_code if response is not None else 0
+            retryable = status in (0, 429) or status >= 500
+            if not retryable or attempt == 2:
+                raise
+            sleep(float(2**attempt))
+    raise RuntimeError("unreachable")
+
+
+def fetch_sport_tag_ids(session: requests.Session) -> set[str]:
+    """Gamma APIから全スポーツタグIDを取得する。"""
+    payload = request_json(session, "GET", f"{GAMMA_BASE}/sports")
+    if not isinstance(payload, list):
+        raise ValueError("sports response must be a list")
+    return {
+        tag.strip()
+        for sport in payload
+        if isinstance(sport, dict)
+        for tag in str(sport.get("tags", "")).split(",")
+        if tag.strip()
+    }
+
+
+def iter_market_pages(
+    session: requests.Session, now: datetime
+) -> Iterator[list[dict[str, Any]]]:
+    """keyset paginationで市場ページを順に返す。"""
+    params: dict[str, object] = {
+        "limit": 100,
+        "closed": "false",
+        "order": "volume_num",
+        "ascending": "false",
+        "volume_num_min": MIN_VOLUME,
+        "liquidity_num_min": MIN_LIQUIDITY,
+        "end_date_min": now.astimezone(timezone.utc).isoformat(),
+        "include_tag": "true",
+    }
+    page_index = 0
+    while True:
+        try:
+            payload = request_json(
+                session,
+                "GET",
+                f"{GAMMA_BASE}/markets/keyset",
+                params=params,
+            )
+        except requests.RequestException as exc:
+            if page_index == 0:
+                raise
+            print(
+                f"警告: 市場ページ取得を途中終了します: {exc}",
+                file=sys.stderr,
+            )
+            return
+        if not isinstance(payload, dict):
+            raise ValueError("markets response must be an object")
+        markets = payload.get("markets")
+        if not isinstance(markets, list):
+            raise ValueError("markets response must contain a list")
+        yield markets
+        page_index += 1
+        cursor = payload.get("next_cursor")
+        if not cursor:
+            return
+        params = {**params, "after_cursor": str(cursor)}
+
+
+def _parse_midpoints(payload: object) -> dict[str, float]:
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, float] = {}
+    for token_id, raw_price in payload.items():
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= price <= 1.0:
+            result[str(token_id)] = price
+    return result
+
+
+def _fetch_midpoint_batch(
+    session: requests.Session, token_ids: list[str]
+) -> dict[str, float]:
+    try:
+        payload = request_json(
+            session,
+            "POST",
+            f"{CLOB_BASE}/midpoints",
+            json=[{"token_id": token_id} for token_id in token_ids],
+        )
+        return _parse_midpoints(payload)
+    except requests.RequestException:
+        if len(token_ids) == 1:
+            print(
+                f"警告: CLOB価格を取得できません: {token_ids[0]}",
+                file=sys.stderr,
+            )
+            return {}
+        middle = len(token_ids) // 2
+        return {
+            **_fetch_midpoint_batch(session, token_ids[:middle]),
+            **_fetch_midpoint_batch(session, token_ids[middle:]),
+        }
+
+
+def fetch_midpoints(
+    session: requests.Session,
+    token_ids: list[str],
+    batch_size: int = 50,
+) -> dict[str, float]:
+    """CLOB midpointをバッチ取得し、有効価格だけ返す。"""
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    result: dict[str, float] = {}
+    for start in range(0, len(token_ids), batch_size):
+        result.update(
+            _fetch_midpoint_batch(
+                session, token_ids[start : start + batch_size]
+            )
+        )
+    return result
