@@ -1,5 +1,8 @@
+import codecs
+import json
 import re
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -26,6 +29,28 @@ RESULT_KEYS = (
 )
 
 SCHEMA_VERSION = "1.0"
+
+STRING_INPUT_KEYS = frozenset(
+    (
+        "市場ID",
+        "市場",
+        "締切日",
+        "カテゴリ",
+        "URL",
+        "分析基準日時",
+        "選定理由",
+    )
+)
+
+NUMBER_INPUT_KEYS = frozenset(
+    (
+        "YES価格",
+        "NO価格",
+        "出来高",
+        "流動性",
+        "締切までの日数",
+    )
+)
 
 ANALYSIS_INPUT_NAME = re.compile(
     r"^analysis_input_(\d{4}-\d{2}-\d{2})_(\d{4})\.json$"
@@ -63,3 +88,104 @@ def output_path_for(input_path: Path) -> Path:
 
     suffix = f"{match.group(1)}_{match.group(2)}"
     return input_path.with_name(f"analysis_result_{suffix}.json")
+
+
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSONキーが重複しています: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_constant(raw_value: str) -> None:
+    raise ValueError(f"非有限のJSON numberです: {raw_value}")
+
+
+def _validate_reference_time(raw_value: str) -> None:
+    normalized = (
+        f"{raw_value[:-1]}+00:00"
+        if raw_value.endswith("Z")
+        else raw_value
+    )
+    try:
+        value = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError("分析基準日時が不正です") from None
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("分析基準日時にはタイムゾーンが必要です")
+
+
+def load_analysis_inputs(path: Path) -> list[dict[str, object]]:
+    payload = path.read_bytes()
+    if payload.startswith(codecs.BOM_UTF8):
+        raise ValueError("分析入力JSONにUTF-8 BOMは使用できません")
+
+    try:
+        text = payload.decode("utf-8", errors="strict")
+        parsed = json.loads(
+            text,
+            parse_float=Decimal,
+            parse_int=Decimal,
+            parse_constant=_reject_non_finite_constant,
+            object_pairs_hook=_object_without_duplicate_keys,
+        )
+    except UnicodeError:
+        raise ValueError("分析入力JSONがUTF-8ではありません") from None
+    except json.JSONDecodeError:
+        raise ValueError("分析入力JSONが不正です") from None
+
+    if not isinstance(parsed, list):
+        raise ValueError("JSONトップレベルは配列である必要があります")
+
+    records: list[dict[str, object]] = []
+    market_ids: set[str] = set()
+    reference_time: str | None = None
+
+    for element_number, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{element_number}番目の要素がオブジェクトではありません"
+            )
+
+        missing = [key for key in INPUT_KEYS if key not in item]
+        if missing:
+            raise ValueError(
+                f"{element_number}番目の要素に必須キーが不足しています: "
+                f"{', '.join(missing)}"
+            )
+
+        for key in STRING_INPUT_KEYS:
+            if not isinstance(item[key], str):
+                raise ValueError(
+                    f"{element_number}番目の{key}の型が不正です"
+                )
+
+        for key in NUMBER_INPUT_KEYS:
+            value = item[key]
+            if not isinstance(value, Decimal) or not value.is_finite():
+                raise ValueError(
+                    f"{element_number}番目の{key}の型が不正です"
+                )
+
+        market_id = item["市場ID"]
+        if not market_id.strip():
+            raise ValueError(f"{element_number}番目の市場IDが空です")
+        if market_id in market_ids:
+            raise ValueError(f"市場IDが重複しています: {market_id}")
+        market_ids.add(market_id)
+
+        current_reference = item["分析基準日時"]
+        _validate_reference_time(current_reference)
+        if reference_time is None:
+            reference_time = current_reference
+        elif current_reference != reference_time:
+            raise ValueError("分析基準日時が不統一です")
+
+        records.append(item)
+
+    return records
