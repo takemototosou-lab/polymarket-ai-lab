@@ -5,3 +5,4 @@ __pycache__/
 data/markets_*.csv
 data/candidates_*.csv
 data/analysis_input_*.json
+data/analysis_result_*.json

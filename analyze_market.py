@@ -1,9 +1,13 @@
 import codecs
 import json
+import os
 import re
+import sys
+import tempfile
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import BinaryIO
 
 
 INPUT_KEYS = (
@@ -55,6 +59,8 @@ NUMBER_INPUT_KEYS = frozenset(
 ANALYSIS_INPUT_NAME = re.compile(
     r"^analysis_input_(\d{4}-\d{2}-\d{2})_(\d{4})\.json$"
 )
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
 def find_latest_analysis_input(data_dir: Path) -> Path:
@@ -228,3 +234,64 @@ def serialize_analysis_results(
         lines.append(f"  }}{object_comma}")
     lines.append("]")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _write_and_sync(handle: BinaryIO, payload: bytes) -> None:
+    written = handle.write(payload)
+    if written != len(payload):
+        raise OSError("一時ファイルへ全バイトを書き込めません")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def atomic_write(path: Path, payload: bytes) -> None:
+    descriptor: int | None = None
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            _write_and_sync(handle, payload)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        raise
+
+
+def run(data_dir: Path) -> tuple[Path, int]:
+    input_path = find_latest_analysis_input(data_dir)
+    output_path = output_path_for(input_path)
+    input_records = load_analysis_inputs(input_path)
+    results = build_pending_results(input_records)
+    payload = serialize_analysis_results(results)
+    atomic_write(output_path, payload)
+    return output_path, len(results)
+
+
+def main() -> int:
+    try:
+        output_path, count = run(DATA_DIR)
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{output_path} に分析結果{count}件を保存しました")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

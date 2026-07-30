@@ -1,9 +1,12 @@
 import codecs
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import analyze_market
 
@@ -394,6 +397,110 @@ class SerializationTests(unittest.TestCase):
             ["2", "1"],
             [item["market_id"] for item in json.loads(first)],
         )
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_run_replaces_output_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_analysis_input(
+                data_dir,
+                [make_input_record()],
+            )
+            source_before = source.read_bytes()
+            output = data_dir / "analysis_result_2026-07-30_2204.json"
+            output.write_bytes(b"old")
+
+            first_path, first_count = analyze_market.run(data_dir)
+            first_bytes = first_path.read_bytes()
+            second_path, second_count = analyze_market.run(data_dir)
+
+            self.assertEqual((1, 1), (first_count, second_count))
+            self.assertEqual(output, first_path)
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(first_bytes, second_path.read_bytes())
+            self.assertEqual(source_before, source.read_bytes())
+
+    def test_invalid_input_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_analysis_input(data_dir, {"not": "array"})
+            output = data_dir / "analysis_result_2026-07-30_2204.json"
+            output.write_bytes(b"old")
+
+            with self.assertRaisesRegex(ValueError, "トップレベル"):
+                analyze_market.run(data_dir)
+
+            self.assertEqual(b"old", output.read_bytes())
+
+    def test_write_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_result_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                analyze_market,
+                "_write_and_sync",
+                side_effect=OSError("write failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "write failed"):
+                    analyze_market.atomic_write(path, b"new")
+
+            self.assertEqual(b"old", path.read_bytes())
+            self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    def test_replace_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_result_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                analyze_market.os,
+                "replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    analyze_market.atomic_write(path, b"new")
+
+            self.assertEqual(b"old", path.read_bytes())
+            self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    def test_main_reports_zero_results_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_analysis_input(data_dir, [])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch.object(analyze_market, "DATA_DIR", data_dir),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = analyze_market.main()
+
+            output = data_dir / "analysis_result_2026-07-30_2204.json"
+            self.assertEqual(0, exit_code)
+            self.assertEqual(b"[]\n", output.read_bytes())
+            self.assertIn("分析結果0件", stdout.getvalue())
+            self.assertEqual("", stderr.getvalue())
+
+    def test_main_reports_invalid_input_as_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch.object(analyze_market, "DATA_DIR", data_dir),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = analyze_market.main()
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("エラー:", stderr.getvalue())
 
 
 if __name__ == "__main__":
