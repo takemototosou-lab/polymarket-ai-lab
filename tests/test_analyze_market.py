@@ -1,3 +1,4 @@
+import codecs
 import json
 import os
 import tempfile
@@ -344,6 +345,55 @@ class PendingResultTests(unittest.TestCase):
 
     def test_empty_input_produces_empty_result_list(self):
         self.assertEqual([], analyze_market.build_pending_results([]))
+
+
+class SerializationTests(unittest.TestCase):
+    def test_empty_array_is_exactly_three_bytes(self):
+        self.assertEqual(
+            b"[]\n",
+            analyze_market.serialize_analysis_results([]),
+        )
+
+    def test_serializes_fixed_key_order_utf8_and_lf(self):
+        record = {
+            "schema_version": "1.0",
+            "market_id": '日本語 "id" \\ path\nnext',
+            "analysis_reference_time": REFERENCE_TIME,
+            "status": "pending",
+        }
+
+        payload = analyze_market.serialize_analysis_results([record])
+
+        self.assertFalse(payload.startswith(codecs.BOM_UTF8))
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertNotIn(b"\r\n", payload)
+        text = payload.decode("utf-8")
+        self.assertIn(
+            '"market_id": "日本語 \\"id\\" \\\\ path\\nnext"',
+            text,
+        )
+        parsed = json.loads(text, object_pairs_hook=list)
+        self.assertEqual(
+            list(analyze_market.RESULT_KEYS),
+            [key for key, _ in parsed[0]],
+        )
+
+    def test_preserves_result_order_and_is_byte_deterministic(self):
+        records = analyze_market.build_pending_results(
+            [
+                make_input_record(market_id="2"),
+                make_input_record(market_id="1"),
+            ]
+        )
+
+        first = analyze_market.serialize_analysis_results(records)
+        second = analyze_market.serialize_analysis_results(records)
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            ["2", "1"],
+            [item["market_id"] for item in json.loads(first)],
+        )
 
 
 if __name__ == "__main__":

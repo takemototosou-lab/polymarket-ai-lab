@@ -203,3 +203,28 @@ def build_pending_results(
         }
         for record in records
     ]
+
+
+def _json_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def serialize_analysis_results(
+    records: list[dict[str, str]],
+) -> bytes:
+    if not records:
+        return b"[]\n"
+
+    lines = ["["]
+    for record_index, record in enumerate(records):
+        lines.append("  {")
+        for key_index, key in enumerate(RESULT_KEYS):
+            comma = "," if key_index < len(RESULT_KEYS) - 1 else ""
+            lines.append(
+                f"    {_json_string(key)}: "
+                f"{_json_string(record[key])}{comma}"
+            )
+        object_comma = "," if record_index < len(records) - 1 else ""
+        lines.append(f"  }}{object_comma}")
+    lines.append("]")
+    return ("\n".join(lines) + "\n").encode("utf-8")
