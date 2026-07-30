@@ -33,6 +33,64 @@ data/markets_YYYY-MM-DD_HHMM.csv
 
 同じ分に再実行した場合も、既存ファイルは上書きしません。
 
+## AI分析候補の選別
+
+最新の市場CSVから、AI分析へ渡す候補を最大10件選ぶ場合は次を実行します。
+
+```powershell
+python select_candidates.py
+```
+
+出力先は、実行日時ではなく元CSVの取得日時に対応する次のファイルです。
+
+```text
+data/candidates_YYYY-MM-DD_HHMM.csv
+```
+
+元の市場CSVは変更しません。同じ入力を再実行すると同じ候補ファイルを上書きし、内容はバイト単位で一致します。
+
+### 候補条件
+
+- YES価格が0.10以上0.90以下（境界を含む）
+- 元CSV各行の取得日時から締切までが7日以上90日以下（境界を含む）
+- 出来高の高い順を基本とする
+- 同一テーマは正規化したURLで判定する
+- カテゴリとテーマへの偏りを3段階で抑える
+- 最大10件
+
+価格と期限の条件は自動的に緩和しません。該当市場が0件になることは正常です。その場合も、UTF-8 BOM付きのヘッダーだけの候補CSVを出力し、`候補0件` と表示して終了コード0で終了します。
+
+元CSV内の取得日時が1文字でも異なる場合は入力不正とし、候補CSVを作成または上書きしません。
+
+### カテゴリ優先順位
+
+市場名とURLが複数カテゴリの固定キーワードに一致した場合は、次の優先順位で最初に一致したカテゴリを採用します。
+
+| 優先順位 | カテゴリ | 固定キーワード |
+| ---: | --- | --- |
+| 1 | 政治 | election, president, presidential, nominee, nomination, congress, senate, governor, prime minister, parliament, vote |
+| 2 | 国際情勢 | war, invasion, invade, ceasefire, iran, israel, ukraine, russia, china, taiwan, nato, greenland |
+| 3 | 暗号資産 | bitcoin, btc, ethereum, eth, crypto, solana, token |
+| 4 | 経済・金融 | federal reserve, fed, interest rate, inflation, recession, gdp, unemployment, stock, s&p, nasdaq, market cap |
+| 5 | テクノロジー | artificial intelligence, openai, spacex, tesla, iphone, apple, google, microsoft, ai |
+| 6 | エンタメ | album, movie, film, box office, gta, game, oscar, grammy, music |
+| 7 | 科学・健康 | nasa, alien, vaccine, disease, covid, health, drug, medicine |
+| 8 | その他 | 上記に一致しない市場 |
+
+キーワード一覧と優先順位の正本は、`select_candidates.py` の `CATEGORY_RULES` 定数です。キーワードは英数字の単語境界で照合するため、例えば `ai` は `said` の一部には一致しません。
+
+### テーマと分散規則
+
+テーマ用URLはschemeとhostを小文字化し、queryとfragmentを除去し、path末尾のスラッシュを除去します。URLが欠損または不正な場合は市場IDをテーマ識別子として使います。
+
+候補は次の順で補完します。
+
+1. 同一テーマ1件、同一カテゴリ2件まで
+2. カテゴリ上限だけを解除し、同一テーマ1件を維持
+3. テーマ上限も解除し、残りを出来高順で補完
+
+どの段階でも価格と期限の条件は緩和しません。同率時は市場ID、正規化テーマ、市場名、締切日、価格、流動性、元CSV行番号まで含む固定キーで順序を確定します。
+
 ## 取得条件
 
 - Gamma API上で有効
@@ -72,7 +130,7 @@ CSVは取得時点のスナップショットです。過去の検証では、�
 python -m unittest discover -s tests -v
 ```
 
-単体テストは外部APIへ接続せず、通信応答を制御して再試行、絞り込み、価格対応、重複除外、CSVエンコーディングを確認します。
+単体テストは外部APIへ接続しません。収集機の再試行、絞り込み、価格対応、重複除外、CSVエンコーディングに加え、候補選別機の境界値、取得日時基準、URL正規化、分散選択、0件出力、入力不正、バイト単位の決定性を確認します。
 
 ## 使用API
 
