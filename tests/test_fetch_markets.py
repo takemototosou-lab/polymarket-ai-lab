@@ -211,6 +211,7 @@ class ApiClientTests(unittest.TestCase):
             [["1"], ["2"]],
             [[market["id"] for market in page] for page in pages],
         )
+        self.assertEqual("volumeNum", session.calls[0]["params"]["order"])
         self.assertEqual("abc", session.calls[1]["params"]["after_cursor"])
 
     def test_maps_valid_midpoints_and_skips_invalid_values(self):

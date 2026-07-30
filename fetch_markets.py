@@ -179,7 +179,7 @@ def iter_market_pages(
     params: dict[str, object] = {
         "limit": 100,
         "closed": "false",
-        "order": "volume_num",
+        "order": "volumeNum",
         "ascending": "false",
         "volume_num_min": MIN_VOLUME,
         "liquidity_num_min": MIN_LIQUIDITY,
