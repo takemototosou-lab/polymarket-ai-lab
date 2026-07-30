@@ -135,6 +135,7 @@ CATEGORY_RULES = (
             "medicine",
         ),
     ),
+    ("その他", ()),
 )
 
 MIN_YES_PRICE = Decimal("0.10")
@@ -197,12 +198,12 @@ def categorize_market(question: str, normalized_theme: str) -> str:
     """固定優先順位の最初に一致したカテゴリを返す。"""
     target = f"{question} {normalized_theme}".casefold()
     for category, keywords in CATEGORY_RULES:
-        if any(
+        if not keywords or any(
             _keyword_pattern(keyword).search(target)
             for keyword in keywords
         ):
             return category
-    return "その他"
+    raise RuntimeError("カテゴリ規則に既定値がありません")
 
 
 def parse_iso_datetime(value: str) -> datetime:
