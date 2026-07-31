@@ -13,6 +13,8 @@ INPUT_FIELDS = (
     "取得日時",
     "市場ID",
     "市場",
+    "市場説明",
+    "解決情報源",
     "YES価格",
     "NO価格",
     "出来高",
@@ -27,6 +29,8 @@ INPUT_FIELDS = (
 JSON_KEYS = (
     "市場ID",
     "市場",
+    "市場説明",
+    "解決情報源",
     "YES価格",
     "NO価格",
     "出来高",
@@ -59,6 +63,8 @@ SOURCE_KEY_BY_JSON_KEY = {
 }
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+MAX_MARKET_DESCRIPTION_CHARS = 262_144
+MAX_RESOLUTION_SOURCE_CHARS = 32_768
 
 
 def canonical_json_number(raw_value: str, *, field: str, row_number: int) -> str:
@@ -120,6 +126,28 @@ def _validate_fetched_at(raw_value: str) -> None:
         raise ValueError("取得日時にはタイムゾーンが必要です")
 
 
+def _validate_metadata_text(
+    value: object,
+    *,
+    field: str,
+    row_number: int,
+    allow_empty: bool,
+    max_chars: int,
+) -> None:
+    if not isinstance(value, str):
+        raise ValueError(f"{row_number}行目の{field}が不正です")
+    if value != value.replace("\r\n", "\n").replace("\r", "\n").strip():
+        raise ValueError(f"{row_number}行目の{field}が不正です")
+    if not value and not allow_empty:
+        raise ValueError(f"{row_number}行目の{field}が不正です")
+    if (
+        "\x00" in value
+        or any("\ud800" <= character <= "\udfff" for character in value)
+        or len(value) > max_chars
+    ):
+        raise ValueError(f"{row_number}行目の{field}が不正です")
+
+
 def read_analysis_records(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", errors="strict", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -143,6 +171,20 @@ def read_analysis_records(path: Path) -> list[dict[str, str]]:
             raise ValueError(f"{row_number}行目に欠損値があります")
         if not row["市場ID"].strip():
             raise ValueError(f"{row_number}行目の市場IDが空です")
+        _validate_metadata_text(
+            row["市場説明"],
+            field="市場説明",
+            row_number=row_number,
+            allow_empty=False,
+            max_chars=MAX_MARKET_DESCRIPTION_CHARS,
+        )
+        _validate_metadata_text(
+            row["解決情報源"],
+            field="解決情報源",
+            row_number=row_number,
+            allow_empty=True,
+            max_chars=MAX_RESOLUTION_SOURCE_CHARS,
+        )
 
         record: dict[str, str] = {}
         for key in JSON_KEYS:

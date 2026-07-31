@@ -13,6 +13,8 @@ from typing import BinaryIO
 INPUT_KEYS = (
     "市場ID",
     "市場",
+    "市場説明",
+    "解決情報源",
     "YES価格",
     "NO価格",
     "出来高",
@@ -38,6 +40,8 @@ STRING_INPUT_KEYS = frozenset(
     (
         "市場ID",
         "市場",
+        "市場説明",
+        "解決情報源",
         "締切日",
         "カテゴリ",
         "URL",
@@ -61,6 +65,8 @@ ANALYSIS_INPUT_NAME = re.compile(
 )
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+MAX_MARKET_DESCRIPTION_CHARS = 262_144
+MAX_RESOLUTION_SOURCE_CHARS = 32_768
 
 
 def find_latest_analysis_input(data_dir: Path) -> Path:
@@ -126,6 +132,26 @@ def _validate_reference_time(raw_value: str) -> None:
         raise ValueError("分析基準日時にはタイムゾーンが必要です")
 
 
+def _validate_metadata_text(
+    value: str,
+    *,
+    field: str,
+    element_number: int,
+    allow_empty: bool,
+    max_chars: int,
+) -> None:
+    if value != value.replace("\r\n", "\n").replace("\r", "\n").strip():
+        raise ValueError(f"{element_number}番目の{field}が不正です")
+    if not value and not allow_empty:
+        raise ValueError(f"{element_number}番目の{field}が不正です")
+    if (
+        "\x00" in value
+        or any("\ud800" <= character <= "\udfff" for character in value)
+        or len(value) > max_chars
+    ):
+        raise ValueError(f"{element_number}番目の{field}が不正です")
+
+
 def load_analysis_inputs(path: Path) -> list[dict[str, object]]:
     payload = path.read_bytes()
     if payload.startswith(codecs.BOM_UTF8):
@@ -177,6 +203,21 @@ def load_analysis_inputs(path: Path) -> list[dict[str, object]]:
                 raise ValueError(
                     f"{element_number}番目の{key}の型が不正です"
                 )
+
+        _validate_metadata_text(
+            item["市場説明"],
+            field="市場説明",
+            element_number=element_number,
+            allow_empty=False,
+            max_chars=MAX_MARKET_DESCRIPTION_CHARS,
+        )
+        _validate_metadata_text(
+            item["解決情報源"],
+            field="解決情報源",
+            element_number=element_number,
+            allow_empty=True,
+            max_chars=MAX_RESOLUTION_SOURCE_CHARS,
+        )
 
         market_id = item["市場ID"]
         if not market_id.strip():

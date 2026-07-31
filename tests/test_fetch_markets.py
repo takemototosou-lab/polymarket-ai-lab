@@ -1,10 +1,13 @@
 import codecs
 import csv
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import fetch_markets
 import requests
@@ -14,6 +17,8 @@ def make_market(**overrides):
     market = {
         "id": "123",
         "question": "日本語を含む市場?",
+        "description": "This market resolves according to official rules.",
+        "resolutionSource": "https://example.com/source",
         "active": True,
         "closed": False,
         "acceptingOrders": True,
@@ -37,6 +42,8 @@ def make_candidate(market_id, volume, token_ids):
     return {
         "market_id": market_id,
         "question": f"市場 {market_id}",
+        "description": f"Rule for {market_id}\nSecond line",
+        "resolution_source": "Official source",
         "token_ids": token_ids,
         "volume": float(volume),
         "liquidity": 8_000.0,
@@ -50,6 +57,8 @@ def make_csv_row(question):
         "取得日時": "2026-07-30T20:00:00+09:00",
         "市場ID": "123",
         "市場": question,
+        "市場説明": "Rule, one\n\"Rule two\"",
+        "解決情報源": "",
         "YES価格": 0.42,
         "NO価格": 0.58,
         "出来高": 20_000.0,
@@ -99,6 +108,25 @@ class NormalizeMarketTests(unittest.TestCase):
             "https://polymarket.com/event/sample-event", candidate["url"]
         )
 
+    def test_normalizes_and_preserves_resolution_metadata(self):
+        candidate = fetch_markets.normalize_market(
+            make_market(
+                description="  Rule one.\r\n<b>Rule two</b>.\r  ",
+                resolutionSource="  Official notice\r\nArchive  ",
+            ),
+            set(),
+            self.now,
+        )
+
+        self.assertEqual(
+            "Rule one.\n<b>Rule two</b>.",
+            candidate.get("description"),
+        )
+        self.assertEqual(
+            "Official notice\nArchive",
+            candidate.get("resolution_source"),
+        )
+
     def test_rejects_sports_tag(self):
         market = make_market(tags=[{"id": "82"}])
 
@@ -135,6 +163,47 @@ class NormalizeMarketTests(unittest.TestCase):
                 self.assertIsNone(
                     fetch_markets.normalize_market(market, set(), self.now)
                 )
+
+    def test_rejects_invalid_description_and_resolution_source(self):
+        invalid_markets = [
+            make_market(description=None),
+            make_market(description="  \r\n  "),
+            make_market(description=123),
+            make_market(description="bad\x00text"),
+            make_market(description="bad\ud800text"),
+            make_market(
+                description=(
+                    "x"
+                    * (fetch_markets.MAX_MARKET_DESCRIPTION_CHARS + 1)
+                )
+            ),
+            make_market(resolutionSource=123),
+            make_market(resolutionSource="bad\x00text"),
+            make_market(
+                resolutionSource=(
+                    "x" * (fetch_markets.MAX_RESOLUTION_SOURCE_CHARS + 1)
+                )
+            ),
+        ]
+
+        for market in invalid_markets:
+            with self.subTest(market_id=market["id"]):
+                self.assertIsNone(
+                    fetch_markets.normalize_market(market, set(), self.now)
+                )
+
+    def test_defaults_missing_or_null_resolution_source_to_empty(self):
+        missing = make_market()
+        del missing["resolutionSource"]
+
+        for market in (missing, make_market(resolutionSource=None)):
+            with self.subTest(keys=tuple(market)):
+                candidate = fetch_markets.normalize_market(
+                    market,
+                    set(),
+                    self.now,
+                )
+                self.assertEqual("", candidate["resolution_source"])
 
 
 class ApiClientTests(unittest.TestCase):
@@ -253,6 +322,46 @@ class ApiClientTests(unittest.TestCase):
             ),
         )
 
+    def test_collect_candidates_reports_metadata_rejection_counts_only(self):
+        secret_description = "do-not-log-description"
+        secret_source = "do-not-log-source"
+        session = FakeSession(
+            [
+                FakeResponse(200, [{"tags": "1,82"}]),
+                FakeResponse(
+                    200,
+                    {
+                        "markets": [
+                            make_market(
+                                id="1",
+                                description=None,
+                                question=secret_description,
+                            ),
+                            make_market(
+                                id="2",
+                                resolutionSource=123,
+                                question=secret_source,
+                            ),
+                            make_market(id="3"),
+                        ]
+                    },
+                ),
+            ]
+        )
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            candidates = fetch_markets.collect_candidates(
+                session,
+                datetime(2026, 7, 30, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(["3"], [item["market_id"] for item in candidates])
+        self.assertIn("市場説明=1", stderr.getvalue())
+        self.assertIn("解決情報源=1", stderr.getvalue())
+        self.assertNotIn(secret_description, stderr.getvalue())
+        self.assertNotIn(secret_source, stderr.getvalue())
+
 
 class CsvOutputTests(unittest.TestCase):
     def test_deduplicates_sorts_and_requires_both_prices(self):
@@ -322,7 +431,40 @@ class CsvOutputTests(unittest.TestCase):
             with path.open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual("日本語 – café", rows[0]["市場"])
+            self.assertEqual("Rule, one\n\"Rule two\"", rows[0]["市場説明"])
+            self.assertEqual("", rows[0]["解決情報源"])
             self.assertEqual(list(fetch_markets.CSV_FIELDS), list(rows[0]))
+
+    def test_select_rows_propagates_resolution_metadata(self):
+        candidate = make_candidate("1", 20_000, ("yes", "no"))
+
+        rows = fetch_markets.select_rows(
+            [candidate],
+            {"yes": 0.4, "no": 0.6},
+            datetime(2026, 7, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(candidate["description"], rows[0].get("市場説明"))
+        self.assertEqual(
+            candidate["resolution_source"],
+            rows[0].get("解決情報源"),
+        )
+        self.assertEqual(
+            [
+                "取得日時",
+                "市場ID",
+                "市場",
+                "市場説明",
+                "解決情報源",
+                "YES価格",
+                "NO価格",
+                "出来高",
+                "流動性",
+                "締切日",
+                "URL",
+            ],
+            list(fetch_markets.CSV_FIELDS),
+        )
 
     def test_output_path_does_not_overwrite_same_minute_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -341,6 +483,17 @@ class CsvOutputTests(unittest.TestCase):
             self.assertEqual("markets_2026-07-30_2000_45.csv", second.name)
             self.assertEqual("markets_2026-07-30_2000_45_1.csv", third.name)
             self.assertFalse(third.exists())
+
+    def test_replace_failure_does_not_publish_partial_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "markets.csv"
+
+            with patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    fetch_markets.write_csv([make_csv_row("Market?")], path)
+
+            self.assertFalse(path.exists())
+            self.assertEqual([], list(path.parent.glob(".*.tmp")))
 
 
 class CollectionWorkflowTests(unittest.TestCase):

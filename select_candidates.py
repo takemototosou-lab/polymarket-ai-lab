@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import io
+import os
 import re
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +20,8 @@ INPUT_FIELDS = (
     "取得日時",
     "市場ID",
     "市場",
+    "市場説明",
+    "解決情報源",
     "YES価格",
     "NO価格",
     "出来高",
@@ -142,6 +147,8 @@ MIN_YES_PRICE = Decimal("0.10")
 MAX_YES_PRICE = Decimal("0.90")
 MIN_DEADLINE_SECONDS = Decimal(7 * 86_400)
 MAX_DEADLINE_SECONDS = Decimal(90 * 86_400)
+MAX_MARKET_DESCRIPTION_CHARS = 262_144
+MAX_RESOLUTION_SOURCE_CHARS = 32_768
 
 
 @dataclass
@@ -235,6 +242,25 @@ def _sort_key(item: Candidate) -> tuple[object, ...]:
     )
 
 
+def _valid_metadata_text(
+    value: object,
+    *,
+    allow_empty: bool,
+    max_chars: int,
+) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value != value.replace("\r\n", "\n").replace("\r", "\n").strip():
+        return False
+    if not value and not allow_empty:
+        return False
+    if "\x00" in value or any(
+        "\ud800" <= character <= "\udfff" for character in value
+    ):
+        return False
+    return len(value) <= max_chars
+
+
 def prepare_candidates(
     rows: list[dict[str, str]],
     fetched_at: datetime,
@@ -242,6 +268,16 @@ def prepare_candidates(
     """適格行を正規化し、完全ソート後に市場IDで重複排除する。"""
     candidates: list[Candidate] = []
     for row_number, row in enumerate(rows, start=2):
+        if not _valid_metadata_text(
+            row.get("市場説明"),
+            allow_empty=False,
+            max_chars=MAX_MARKET_DESCRIPTION_CHARS,
+        ) or not _valid_metadata_text(
+            row.get("解決情報源"),
+            allow_empty=True,
+            max_chars=MAX_RESOLUTION_SOURCE_CHARS,
+        ):
+            continue
         yes_price = Decimal(row["YES価格"])
         deadline = parse_iso_datetime(row["締切日"])
         deadline_seconds = _timedelta_seconds(deadline - fetched_at)
@@ -429,25 +465,54 @@ def write_candidate_csv(
 ) -> None:
     """候補をUTF-8 BOM付き、固定列順、固定改行で上書き保存する。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=OUTPUT_FIELDS,
-            lineterminator="\r\n",
+    text = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        text,
+        fieldnames=OUTPUT_FIELDS,
+        lineterminator="\r\n",
+    )
+    writer.writeheader()
+    for item in selected:
+        writer.writerow(
+            {
+                **{
+                    field: item.source[field]
+                    for field in INPUT_FIELDS
+                },
+                "カテゴリ": item.category,
+                "締切までの日数": item.days_text,
+                "選定理由": item.reason,
+            }
         )
-        writer.writeheader()
-        for item in selected:
-            writer.writerow(
-                {
-                    **{
-                        field: item.source[field]
-                        for field in INPUT_FIELDS
-                    },
-                    "カテゴリ": item.category,
-                    "締切までの日数": item.days_text,
-                    "選定理由": item.reason,
-                }
-            )
+    payload = text.getvalue().encode("utf-8-sig")
+
+    descriptor: int | None = None
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        raise
 
 
 def run(data_dir: Path) -> tuple[Path, int]:

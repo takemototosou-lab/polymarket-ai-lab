@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+import os
 import sys
+import tempfile
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,11 +26,15 @@ MIN_LIQUIDITY = 5_000.0
 SPORTS_FIELDS = ("gameId", "gameStartTime", "sportsMarketType")
 OUTPUT_LIMIT = 100
 CANDIDATE_TARGET = 150
+MAX_MARKET_DESCRIPTION_CHARS = 262_144
+MAX_RESOLUTION_SOURCE_CHARS = 32_768
 JST = timezone(timedelta(hours=9), "JST")
 CSV_FIELDS = (
     "取得日時",
     "市場ID",
     "市場",
+    "市場説明",
+    "解決情報源",
     "YES価格",
     "NO価格",
     "出来高",
@@ -34,6 +42,14 @@ CSV_FIELDS = (
     "締切日",
     "URL",
 )
+
+
+class MetadataValidationError(ValueError):
+    """市場metadataの不正fieldを本文なしで伝える。"""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(field)
+        self.field = field
 
 
 def parse_json_list(value: object) -> list[str]:
@@ -52,6 +68,30 @@ def parse_iso_datetime(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timezone required")
     return parsed
+
+
+def normalize_metadata_text(
+    value: object,
+    *,
+    field: str,
+    allow_missing: bool,
+    max_chars: int,
+) -> str:
+    """Gammaのmetadata文字列を固定規則で検証・正規化する。"""
+    if value is None and allow_missing:
+        return ""
+    if not isinstance(value, str):
+        raise MetadataValidationError(field)
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized and not allow_missing:
+        raise MetadataValidationError(field)
+    if "\x00" in normalized or any(
+        "\ud800" <= character <= "\udfff" for character in normalized
+    ):
+        raise MetadataValidationError(field)
+    if len(normalized) > max_chars:
+        raise MetadataValidationError(field)
+    return normalized
 
 
 def market_tags(market: dict[str, Any]) -> set[str]:
@@ -89,7 +129,10 @@ def market_url(market: dict[str, Any]) -> str:
 
 
 def normalize_market(
-    market: dict[str, Any], sport_tag_ids: set[str], now: datetime
+    market: dict[str, Any],
+    sport_tag_ids: set[str],
+    now: datetime,
+    metadata_rejections: Counter[str] | None = None,
 ) -> dict[str, Any] | None:
     """保存条件を満たす市場を内部形式へ正規化する。"""
     try:
@@ -98,6 +141,18 @@ def normalize_market(
         ]
         token_ids = parse_json_list(market["clobTokenIds"])
         end_date = parse_iso_datetime(market["endDate"])
+        description = normalize_metadata_text(
+            market.get("description"),
+            field="市場説明",
+            allow_missing=False,
+            max_chars=MAX_MARKET_DESCRIPTION_CHARS,
+        )
+        resolution_source = normalize_metadata_text(
+            market.get("resolutionSource"),
+            field="解決情報源",
+            allow_missing=True,
+            max_chars=MAX_RESOLUTION_SOURCE_CHARS,
+        )
         volume = float(market.get("volumeNum") or market["volume"])
         liquidity = float(
             market.get("liquidityNum") or market["liquidity"]
@@ -118,12 +173,18 @@ def normalize_market(
         return {
             "market_id": str(market["id"]),
             "question": str(market["question"]),
+            "description": description,
+            "resolution_source": resolution_source,
             "token_ids": (token_ids[0], token_ids[1]),
             "volume": volume,
             "liquidity": liquidity,
             "end_date": str(market["endDate"]),
             "url": market_url(market),
         }
+    except MetadataValidationError as exc:
+        if metadata_rejections is not None:
+            metadata_rejections[exc.field] += 1
+        return None
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -297,6 +358,8 @@ def select_rows(
                 "取得日時": fetched_at.isoformat(),
                 "市場ID": market_id,
                 "市場": candidate["question"],
+                "市場説明": candidate["description"],
+                "解決情報源": candidate["resolution_source"],
                 "YES価格": midpoints[yes_token],
                 "NO価格": midpoints[no_token],
                 "出来高": candidate["volume"],
@@ -328,10 +391,48 @@ def choose_output_path(data_dir: Path, fetched_at: datetime) -> Path:
 def write_csv(rows: list[dict[str, object]], path: Path) -> None:
     """CSVをUTF-8 BOM付きで新規保存する。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+    if path.exists():
+        raise FileExistsError(path)
+
+    text = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        text,
+        fieldnames=CSV_FIELDS,
+        lineterminator="\r\n",
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    payload = text.getvalue().encode("utf-8-sig")
+
+    descriptor: int | None = None
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            raise FileExistsError(path)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        raise
 
 
 def collect_candidates(
@@ -340,17 +441,28 @@ def collect_candidates(
     """Gamma APIから条件を満たす候補を収集する。"""
     sport_tag_ids = fetch_sport_tag_ids(session)
     candidates: list[dict[str, Any]] = []
+    metadata_rejections: Counter[str] = Counter()
     for page in iter_market_pages(session, fetched_at):
         for market in page:
             if not isinstance(market, dict):
                 continue
             candidate = normalize_market(
-                market, sport_tag_ids, fetched_at
+                market,
+                sport_tag_ids,
+                fetched_at,
+                metadata_rejections,
             )
             if candidate is not None:
                 candidates.append(candidate)
         if len(candidates) >= CANDIDATE_TARGET:
             break
+    if metadata_rejections:
+        print(
+            "警告: metadata不正で除外: "
+            f"市場説明={metadata_rejections['市場説明']}, "
+            f"解決情報源={metadata_rejections['解決情報源']}",
+            file=sys.stderr,
+        )
     return candidates
 
 

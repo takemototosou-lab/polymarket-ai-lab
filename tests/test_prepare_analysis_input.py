@@ -25,6 +25,8 @@ def make_candidate_row(
         "取得日時": fetched_at,
         "市場ID": market_id,
         "市場": market,
+        "市場説明": "Resolution rule\nSecond line",
+        "解決情報源": "",
         "YES価格": "0.10",
         "NO価格": "0.90",
         "出来高": "1000.00",
@@ -68,6 +70,8 @@ def make_analysis_record(*, market_id="1") -> dict[str, str]:
     return {
         "市場ID": market_id,
         "市場": "市場A",
+        "市場説明": "Resolution rule\nSecond line",
+        "解決情報源": "",
         "YES価格": "0.1",
         "NO価格": "0.9",
         "出来高": "1000",
@@ -225,6 +229,77 @@ class InputContractTests(unittest.TestCase):
             self.assertNotIn("追加列", records[0])
             self.assertEqual(FETCHED_AT, records[0]["分析基準日時"])
 
+    def test_propagates_multiline_resolution_metadata_to_fourteen_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_candidate_csv(
+                Path(directory),
+                [
+                    make_candidate_row(
+                        **{
+                            "市場説明": "Rule, one\n\"Rule two\"",
+                            "解決情報源": "",
+                        }
+                    )
+                ],
+            )
+
+            records = prepare_analysis_input.read_analysis_records(path)
+            payload = prepare_analysis_input.serialize_analysis_input(records)
+            parsed = json.loads(payload)
+
+            self.assertEqual(
+                "Rule, one\n\"Rule two\"",
+                parsed[0].get("市場説明"),
+            )
+            self.assertEqual("", parsed[0].get("解決情報源"))
+            self.assertEqual(
+                [
+                    "市場ID",
+                    "市場",
+                    "市場説明",
+                    "解決情報源",
+                    "YES価格",
+                    "NO価格",
+                    "出来高",
+                    "流動性",
+                    "締切日",
+                    "カテゴリ",
+                    "締切までの日数",
+                    "URL",
+                    "分析基準日時",
+                    "選定理由",
+                ],
+                list(prepare_analysis_input.JSON_KEYS),
+            )
+
+    def test_rejects_old_twelve_column_candidate_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_fields = [
+                field
+                for field in prepare_analysis_input.INPUT_FIELDS
+                if field not in {"市場説明", "解決情報源"}
+            ]
+            path = write_candidate_csv(
+                Path(directory),
+                [make_candidate_row()],
+                fieldnames=old_fields,
+            )
+
+            with self.assertRaisesRegex(ValueError, "市場説明.*解決情報源"):
+                prepare_analysis_input.read_analysis_records(path)
+
+    def test_rejects_invalid_description_but_accepts_empty_resolution_source(self):
+        invalid_descriptions = ("", "   ", "bad\rtext", "bad\x00text")
+        for description in invalid_descriptions:
+            with self.subTest(description=repr(description)):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = write_candidate_csv(
+                        Path(directory),
+                        [make_candidate_row(**{"市場説明": description})],
+                    )
+                    with self.assertRaisesRegex(ValueError, "市場説明"):
+                        prepare_analysis_input.read_analysis_records(path)
+
 
 class SerializationTests(unittest.TestCase):
     def test_empty_array_is_exactly_three_bytes(self):
@@ -237,6 +312,8 @@ class SerializationTests(unittest.TestCase):
         record = {
             "市場ID": "2",
             "市場": '日本語 "quote" \\ path\nnext',
+            "市場説明": "Rule\nSecond line",
+            "解決情報源": "",
             "YES価格": "0.1",
             "NO価格": "0.9",
             "出来高": "1000",

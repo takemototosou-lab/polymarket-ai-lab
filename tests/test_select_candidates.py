@@ -18,6 +18,8 @@ def make_row(
     *,
     market_id="1",
     question="General question?",
+    description="Resolution rule\nSecond line",
+    resolution_source="",
     yes="0.50",
     no="0.50",
     volume="100",
@@ -30,6 +32,8 @@ def make_row(
         "取得日時": fetched_at,
         "市場ID": market_id,
         "市場": question,
+        "市場説明": description,
+        "解決情報源": resolution_source,
         "YES価格": yes,
         "NO価格": no,
         "出来高": volume,
@@ -189,6 +193,20 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(1, len(result))
         self.assertEqual("7.00", result[0].days_text)
 
+    def test_invalid_description_is_not_eligible_but_empty_source_is(self):
+        rows = [
+            make_row(market_id="blank", description="   "),
+            make_row(
+                market_id="valid",
+                description="Rule",
+                resolution_source="",
+            ),
+        ]
+
+        result = select_candidates.prepare_candidates(rows, FETCHED_AT)
+
+        self.assertEqual(["valid"], [item.market_id for item in result])
+
 
 class SelectionTests(unittest.TestCase):
     def test_stable_sort_deduplicates_market_id(self):
@@ -320,6 +338,87 @@ class WorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual([], list(reader))
             self.assertEqual(source_before, source.read_bytes())
+
+    def test_propagates_resolution_metadata_to_fixed_fourteen_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_market_csv(
+                data_dir,
+                [
+                    make_row(
+                        description="Rule, one\n\"Rule two\"",
+                        resolution_source="Official notice",
+                    )
+                ],
+            )
+
+            output, count = select_candidates.run(data_dir)
+
+            self.assertEqual(1, count)
+            with output.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+            self.assertEqual(
+                [
+                    "取得日時",
+                    "市場ID",
+                    "市場",
+                    "市場説明",
+                    "解決情報源",
+                    "YES価格",
+                    "NO価格",
+                    "出来高",
+                    "流動性",
+                    "締切日",
+                    "URL",
+                    "カテゴリ",
+                    "締切までの日数",
+                    "選定理由",
+                ],
+                reader.fieldnames,
+            )
+            self.assertEqual("Rule, one\n\"Rule two\"", rows[0]["市場説明"])
+            self.assertEqual("Official notice", rows[0]["解決情報源"])
+            self.assertTrue(source.exists())
+
+    def test_rejects_old_nine_column_market_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            old_fields = [
+                "取得日時",
+                "市場ID",
+                "市場",
+                "YES価格",
+                "NO価格",
+                "出来高",
+                "流動性",
+                "締切日",
+                "URL",
+            ]
+            path = write_market_csv(
+                data_dir,
+                [make_row()],
+                fieldnames=old_fields,
+            )
+
+            with self.assertRaisesRegex(ValueError, "市場説明.*解決情報源"):
+                select_candidates.read_market_csv(path)
+
+    def test_replace_failure_preserves_existing_candidate_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            path = data_dir / "candidates_2026-07-30_1200.csv"
+            path.write_bytes(b"existing")
+            candidate = select_candidates.prepare_candidates(
+                [make_row()], FETCHED_AT
+            )[0]
+
+            with patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    select_candidates.write_candidate_csv(path, [candidate])
+
+            self.assertEqual(b"existing", path.read_bytes())
+            self.assertEqual([], list(data_dir.glob(".*.tmp")))
 
     def test_rejects_inconsistent_acquisition_timestamps_without_output(self):
         rows = [

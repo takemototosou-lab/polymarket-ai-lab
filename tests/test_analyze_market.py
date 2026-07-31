@@ -23,6 +23,8 @@ def make_input_record(
     record = {
         "市場ID": market_id,
         "市場": "市場A",
+        "市場説明": "Resolution rule\nSecond line",
+        "解決情報源": "",
         "YES価格": 0.1,
         "NO価格": 0.9,
         "出来高": 1000,
@@ -116,6 +118,8 @@ class InputValidationTests(unittest.TestCase):
         cases = (
             ("市場ID", 1),
             ("市場", 1),
+            ("市場説明", 1),
+            ("解決情報源", None),
             ("YES価格", True),
             ("NO価格", "0.9"),
             ("出来高", None),
@@ -150,6 +154,61 @@ class InputValidationTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     path = write_analysis_input(Path(directory), records)
                     with self.assertRaisesRegex(ValueError, "市場ID"):
+                        analyze_market.load_analysis_inputs(path)
+
+    def test_accepts_fourteen_key_metadata_contract(self):
+        record = make_input_record(
+            **{
+                "市場説明": "Rule, one\n\"Rule two\"",
+                "解決情報源": "",
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_analysis_input(Path(directory), [record])
+
+            records = analyze_market.load_analysis_inputs(path)
+
+        self.assertEqual("Rule, one\n\"Rule two\"", records[0]["市場説明"])
+        self.assertEqual("", records[0]["解決情報源"])
+        self.assertEqual(
+            [
+                "市場ID",
+                "市場",
+                "市場説明",
+                "解決情報源",
+                "YES価格",
+                "NO価格",
+                "出来高",
+                "流動性",
+                "締切日",
+                "カテゴリ",
+                "締切までの日数",
+                "URL",
+                "分析基準日時",
+                "選定理由",
+            ],
+            list(analyze_market.INPUT_KEYS),
+        )
+
+    def test_rejects_old_twelve_key_input(self):
+        record = make_input_record()
+        del record["市場説明"]
+        del record["解決情報源"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_analysis_input(Path(directory), [record])
+            with self.assertRaisesRegex(ValueError, "市場説明.*解決情報源"):
+                analyze_market.load_analysis_inputs(path)
+
+    def test_rejects_invalid_description_and_accepts_empty_source(self):
+        invalid_descriptions = ("", "   ", "bad\rtext", "bad\x00text")
+        for description in invalid_descriptions:
+            with self.subTest(description=repr(description)):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = write_analysis_input(
+                        Path(directory),
+                        [make_input_record(**{"市場説明": description})],
+                    )
+                    with self.assertRaisesRegex(ValueError, "市場説明"):
                         analyze_market.load_analysis_inputs(path)
 
     def test_accepts_offset_and_z_reference_times(self):
