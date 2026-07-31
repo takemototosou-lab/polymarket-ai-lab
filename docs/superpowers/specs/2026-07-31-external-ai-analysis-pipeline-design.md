@@ -34,6 +34,56 @@ Polymarket操作、自動売買、利益保証、投資助言の確定、GUI、�
 スケジューラ、本番クラウド配備は行わない。分析結果は参考情報であり、
 売買執行とは別工程・別権限とする。
 
+### 2.3 実装開始を止める前提工程: 解決条件の伝播
+
+現行の市場CSVは9列、候補CSVと `analysis_input_*.json` は12キーであり、
+Polymarketの市場説明・解決条件とresolution sourceを保持していない。この状態では
+市場タイトルから解決判定を推測することになるため、**外部検索・AI実装を開始しては
+ならない**。
+
+Polymarket公式仕様では、タイトルは質問を表すだけで、resolution rulesが判定元、
+判定可能時期、曖昧時の扱いを定義する。Gamma APIのmarket objectには
+`description` と `resolutionSource` が公開されている。
+[Resolution](https://docs.polymarket.com/concepts/resolution)
+[List markets](https://docs.polymarket.com/api-reference/markets/list-markets)
+
+先に別の設計・実装・レビュー単位として、次の不変な伝播経路を完成させる。
+
+```text
+Gamma API description / resolutionSource
+  -> markets CSV: 市場説明 / 解決情報源
+  -> candidates CSV: 同じ2列を値変更せず維持
+  -> analysis_input JSON: 同じ2キーを値変更せず維持
+  -> 外部検索query・AI入力
+```
+
+列・キー順は、既存の `市場ID`、`市場` の直後に `市場説明`、`解決情報源` を置く。
+これによりmarkets CSVは11列、候補CSVは既存追加3列を含む14列、analysis inputは
+次の固定14キーになる。
+
+```text
+市場ID, 市場, 市場説明, 解決情報源, YES価格, NO価格, 出来高, 流動性,
+締切日, カテゴリ, 締切までの日数, URL, 分析基準日時, 選定理由
+```
+
+- `市場説明` はGamma `description` の文字列。前後空白除去後に1文字以上を必須とする
+- `解決情報源` はGamma `resolutionSource` の文字列。必須キーだが空文字を許容する
+- Gammaがnullまたは欠落を返した `解決情報源` は空文字として明示し、推測補完しない
+- `市場説明` が欠落・null・空白だけの市場はAI候補にせず、候補0件は従来どおり正常
+- CRLFはLFへ統一し、NULと不正Unicodeを拒否する。それ以外の本文を要約・改変しない
+- `解決情報源` が空でも、市場説明自体に判定ルールがあれば入力契約上は有効とする。
+  AIやコードが架空のresolution sourceを生成してはならない
+
+この変更は `fetch_markets.py`、`select_candidates.py`、
+`prepare_analysis_input.py`、`analyze_market.py` の入力定数、README、plan、test fixture、
+単体テストへ影響するため、本設計ブランチでは実装しない。別設計で移行・互換性・
+欠損処理・既存CSVの扱いを承認してからテスト先行実装する。
+
+外部AI工程は14キーだけを受理し、旧12キーのanalysis inputを入力不正として外部通信前
+に拒否する。旧成果物を暗黙補完せず、更新済み収集機からmarkets、candidates、
+analysis input、2.0 pending結果を順に再生成する。前提工程の全テストと実データ検証が
+完了するまで、本仕様の実装開始ゲートは閉じたままとする。
+
 ## 3. 外部サービスの採用方針
 
 ### 3.1 検索方式
@@ -68,9 +118,9 @@ AIへ渡さず、検索結果データベースを作らない。Braveの規約�
 
 初期実装は **OpenAI Responses API、`gpt-5.6-terra`、Structured Outputsの
 厳格なJSON Schema**を採用する。Terraは公式に知能と費用の均衡用途とされ、
-構造化出力を利用できる。2026-07-31確認時点で入力100万token当たり2.50
-米ドル、出力15米ドルである。モデル・価格は固定仕様ではなく、実装時と
-運用開始前に再確認する。
+構造化出力を利用できる。2026-07-31再レビュー時、同じ公式モデルページの直接取得と
+検索cacheで料金表示に差異が確認されたため、具体的単価を契約定数にしない。実装時と
+各実行前に公式料金を再確認し、承認済み料金設定なしでは課金callを開始しない。
 [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
 
 初期品質評価で契約充足率が不足する場合だけ `gpt-5.6-sol` を比較し、費用を
@@ -88,7 +138,7 @@ OpenAI API送信データは明示的なopt-inなしに学習へ使われない�
 [OpenAI API data controls](https://developers.openai.com/api/docs/guides/your-data)
 
 `AIProvider` 境界は、モデル入力、厳格JSON Schema、timeout、出力token上限を
-受け、構造化生出力と使用量メタデータだけを返す。正式結果構築、派生計算、
+reasoning effortとともに受け、構造化生出力と使用量メタデータだけを返す。正式結果構築、派生計算、
 エラー分類、ログはプロバイダ実装の責務にしない。
 
 ## 4. 設定・環境変数契約
@@ -104,6 +154,7 @@ OpenAI API送信データは明示的なopt-inなしに学習へ使われない�
 | `POLYMARKET_OPENAI_API_KEY` | OpenAI時必須、空白不可 |
 | `POLYMARKET_AI_MODEL` | 既定 `gpt-5.6-terra`、許可リスト方式 |
 | `POLYMARKET_AI_MODEL_VERSION` | 任意の期待version。providerが返す値との一致検証用 |
+| `POLYMARKET_AI_REASONING_EFFORT` | 既定 `low`。`none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `POLYMARKET_AI_TEMPERATURE` | 既定 `0`、0以上2以下の有限Decimal |
 | `POLYMARKET_AI_SEED` | 既定未指定。対応時のみ64-bit整数 |
 | `POLYMARKET_PROMPT_VERSION` | 必須、初期 `1.0`、`MAJOR.MINOR` |
@@ -111,7 +162,7 @@ OpenAI API送信データは明示的なopt-inなしに学習へ使われない�
 | `POLYMARKET_FETCH_TIMEOUT_SECONDS` | 既定15、1以上60以下 |
 | `POLYMARKET_AI_TIMEOUT_SECONDS` | 既定90、10以上300以下 |
 | `POLYMARKET_RUN_TIMEOUT_SECONDS` | 既定1200、60以上3600以下 |
-| `POLYMARKET_MAX_MARKETS_PER_RUN` | 既定10、1以上10以下 |
+| `POLYMARKET_MAX_MARKETS_PER_RUN` | 既定1、1以上10以下 |
 | `POLYMARKET_MAX_SEARCH_QUERIES_PER_MARKET` | 既定4、1以上6以下 |
 | `POLYMARKET_MAX_RESULTS_PER_QUERY` | 既定5、1以上10以下 |
 | `POLYMARKET_MAX_FETCHES_PER_MARKET` | 既定8、2以上12以下 |
@@ -137,17 +188,30 @@ dry-runは入力・既存結果・設定・対象選択・クエリ生成・予�
 変更で `.env` を `.gitignore` 対象にしてから利用する。APIキー、Cookie、
 秘密鍵、AuthorizationヘッダーをJSON、ログ、例外、README例へ出さない。
 
+GPT-5.6では `reasoning.effort` を意図的に指定する。初期値は費用・latencyを抑える
+`low` とし、代表市場の評価で契約充足率、根拠品質、確率校正の不足が確認された場合
+だけ、同じ評価集合で `medium` と比較する。`high` 以上を既定にしない。
+[OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+
+完了契約の現行 `model_info` は固定8キーでreasoning effortを保存できない。再現条件を
+結果へ残すため、外部AI実装前に完了契約を別レビューで改訂し、`seed` の直後へ
+`reasoning_effort` を追加する。planned 2.0は未実装なので、同じ2.0設計を実装前に
+訂正し、未知キー禁止・固定キー順・completed/error双方のtestを更新する。それまでは
+本仕様を実装しない。実行ログにも設定値とproviderが返す有効値を記録する。
+
 ## 5. 入力ファイルと処理対象
 
 1. ファイル名昇順で最後の `data/analysis_input_*.json` を選ぶ。
 2. 同じ日時suffixの `data/analysis_result_*.json` を唯一の対応結果とする。
 3. 入力と結果の件数、順序、`market_id`、`analysis_reference_time` を検証する。
+   analysis input各要素は2.3節の14キーを必須とし、`市場説明` の非空を検証する。
 4. 空でない結果の全要素は同じ既知 `schema_version` でなければならない。
 5. `1.0` は完了契約4.3の全件移行を原子的に完了してから外部通信を始める。
    1.0/2.0混在や処理中の暗黙移行は禁止する。
 6. 0件は `[]\n` のまま正常終了し、外部通信しない。
 
-初期版は入力順で最大10市場を逐次処理する。`pending` だけが既定対象。
+機能上限は入力順で最大10市場だが、既定では1市場だけを逐次処理する。
+`pending` だけが既定対象。
 `completed` と `error` はバイト上の値を保持し、再分析・自動再試行しない。
 対象market IDを明示するオプションは `pending` の部分実行と、別処理で既に
 `pending` へ戻された `retryable: true` の再試行だけに使用する。
@@ -156,19 +220,25 @@ dry-runは入力・既存結果・設定・対象選択・クエリ生成・予�
 市場単位処理中の結果はメモリだけで保持し、全件処理・全体検証後に一度だけ
 正式結果を置換する。途中停止では実行前ファイルを維持する。
 
+実APIの段階的な通し試験は1市場、3市場、最大10市場の順とする。1市場で入力・
+resolution解釈・source採否・費用・正式結果を利用者がレビューし、3市場で異なる
+カテゴリと言語を評価した後だけ、利用者が設定を10まで明示的に上げる。コードが
+自動的に上限を拡大しない。
+
 ## 6. 検索クエリ生成契約
 
-初期版はAIにクエリを自由生成させず、入力12キーとコード定数
+初期版はAIにクエリを自由生成させず、2.3節の入力14キーとコード定数
 `QUERY_TEMPLATE_VERSION = "1.0"` から次の固定順で最大4件を作る。
 
-1. `official`: 市場タイトル、主要固有名詞、締切日、`official` / 公式
-2. `status`: 市場タイトル、主要固有名詞、締切日、`latest status`
-3. `support`: 市場タイトル、YES成立を支持する語、締切日
-4. `counter`: 市場タイトル、NO成立・延期・否定を示す語、締切日
+1. `official`: 市場タイトル、解決情報源、説明内の判定主体、締切日、`official` / 公式
+2. `status`: 市場タイトル、説明内の対象事象・固有名詞、締切日、`latest status`
+3. `support`: 解決条件に照らしてYES成立を支持する語、締切日
+4. `counter`: 解決条件に照らしてNO成立・延期・例外条件を示す語、締切日
 
-市場入力に解決条件・説明文がないため、初期版は存在を推測しない。タイトル、
-カテゴリ、締切日、URL hostから決定的に抽出できる語だけを使う。固有名詞抽出
-が曖昧でもタイトル全文を残す。地域、人名、組織名、製品名を推測で追加しない。
+市場タイトルだけでなく `市場説明` を判定契約の正本としてqueryへ反映する。
+`解決情報源` が非空ならofficial queryへ含め、空なら補完しない。説明、タイトル、
+カテゴリ、締切日、URL hostから決定的に抽出できる語だけを使う。固有名詞抽出が
+曖昧でもタイトル全文を残し、地域、人名、組織名、製品名を推測で追加しない。
 
 - 入力タイトルのUnicode NFKC、C0制御文字除去、連続空白畳みを行う
 - 1クエリはUTF-8換算ではなくUnicodeコードポイントで1～300文字
@@ -317,9 +387,9 @@ AIリクエストは1市場単位。市場セクション、規則セクショ�
 出力schemaを明示的に分離する。入力順は次の固定順とする。
 
 1. `market_id`
-2. 市場タイトル、YES/NO価格、締切日、カテゴリ、URL
-3. `analysis_reference_time` と選定理由
-4. 「解決条件の本文は入力に存在しない」等の既知の制約
+2. 市場タイトル、市場説明・解決条件、resolution source
+3. YES/NO価格、締切日、カテゴリ、URL
+4. `analysis_reference_time` と選定理由
 5. prompt versionが指す分析手順と禁止事項
 6. canonical URL等で安定ソート済みの情報源材料
 7. 厳格なAI生出力JSON Schema
@@ -376,7 +446,7 @@ APIキー、secret、架空URL、入力外candidate ID、自由エラーコー�
 
 `PROMPT_VERSION = "1.0"` は次の順序を意味する。
 
-1. 市場タイトル、締切、既知の解決条件不足を確認する
+1. 市場タイトル、`市場説明` の解決条件、resolution source、締切を確認する
 2. `analysis_reference_time` より後の情報を排除する
 3. 各候補の関連性、独立性、publisher、primary/secondaryを評価する
 4. YES成立を支持する材料を整理する
@@ -421,8 +491,9 @@ AI候補が意味検証に合格した後、コードが完了契約どおりsou
 `S1`から採番する。candidate参照をsource参照へ一意に変換し、Decimal、
 `ROUND_HALF_UP`、最大4桁でNO確率・市場価格・差・結論を派生する。
 
-`model_info` は実際のprovider/model/model_version/prompt version/temperature/
-seed/tools/search providerから構築する。OpenAIが安定したmodel versionを返さない
+`model_info` は2.3節と4節の前提契約改訂後、実際のprovider/model/model version/
+prompt version/temperature/seed/reasoning effort/tools/search providerから構築する。
+OpenAIが安定したmodel versionを返さない
 場合はnullとし、推測しない。`POLYMARKET_AI_MODEL_VERSION` はproviderが公開・返却
 するversionの期待値であり、request parameterや出力上書き値ではない。設定したのに
 照合できない、または不一致なら外部通信前または当該response受領時に全体失敗する。
@@ -487,7 +558,7 @@ UTC形式。`details` はevent別の既知キーだけを許可する。
 初期イベント:
 
 - `run_started`: 相対入力名、相対結果名、schema/prompt/query template version、
-  provider/model/search provider、dry-run、対象・pending件数、設定上限
+  provider/model/reasoning effort/search provider、dry-run、対象・pending件数、設定上限
 - `market_started`: market ID、入力順、attempted time
 - `search_finished`: query分類、成功/失敗、結果件数、課金対象request数、retry数
 - `retrieval_finished`: 候補件数、取得成功/拒否/失敗件数。URL本文は記録しない
@@ -572,7 +643,7 @@ source URLだけを持つ。本文の長い逐語引用をAIへ要求しない�
 
 | 項目 | 初期推奨 | 絶対上限 |
 | --- | ---: | ---: |
-| 市場/実行 | 10 | 10 |
+| 市場/実行 | 1 | 10 |
 | 検索query/市場 | 4 | 6 |
 | 結果/query | 5 | 10 |
 | 検索候補/市場 | 20 | 60 |
@@ -599,6 +670,10 @@ source URLだけを持つ。本文の長い逐語引用をAIへ要求しない�
 request/tokenハード上限で止める。予算超過は新たな市場を開始せず、既処理結果と
 未処理pendingを全体検証後に保存できる。ただし実行開始前から設定不正なら全体失敗。
 
+市場数は1→3→10の段階ゲートを設ける。1から3、3から10へ増やすには、利用者が
+直前段階のresolution解釈、情報源参照整合、AI出力契約充足、費用実績をレビューし、
+環境変数を明示変更する。単に処理が終了しただけでは拡大しない。
+
 ## 23. 決定性と再現性
 
 ### 23.1 契約・シリアライズの決定性
@@ -614,10 +689,12 @@ temp名、host情報をシリアライズ時に差し込まない。
 ### 23.2 外部検索・AI推論の再現性
 
 検索index・順位、ページ内容・削除・訂正、DNS、provider仕様、model alias、timeout、
-rate limit、推論基盤は変化する。temperature 0やseedを使っても同一結果を保証しない。
+rate limit、推論基盤は変化する。同じreasoning effort、temperature 0やseedを使っても
+同一結果を保証しない。
 本文とモデル生出力を永続保存しないため、完全再現も保証しない。
 
-結果JSONのURL・日時・model info・prompt version・参照関係と、ログのrun ID、query分類、
+結果JSONのURL・日時・model info（前提改訂後のreasoning effortを含む）・prompt version・
+参照関係と、ログのrun ID、query分類、
 回数、usage、状態・errorから条件を追跡する。query本文、検索結果全文、取得本文、
 AI生出力までは追跡できない。この境界を完全監査と誤認しない。
 
@@ -626,8 +703,8 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 含める:
 
 - Brave Search API 1 provider、OpenAI Responses API 1 provider
-- 既定1モデル `gpt-5.6-terra`、strict Structured Outputs
-- 最大10市場の逐次処理、pendingだけ
+- 既定1モデル `gpt-5.6-terra`、reasoning effort `low`、strict Structured Outputs
+- 既定1市場・機能上限10市場の逐次処理、pendingだけ。実APIは1→3→10で拡大
 - 公開HTTP(S)、HTML/JSON/text、as-of時点検証
 - 決定的4 query、安全なURL取得、2～8source
 - 生本文・検索結果・AI生出力を永続保存しない
@@ -646,28 +723,35 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 
 ## 25. 実装分割案
 
-設計承認後も一括実装せず、各段階でunit testと既存回帰を通す。
+本仕様単独の承認後も外部AI実装へ進まない。最初に前提工程を別作業として行う。
 
-1. 設定schema、secret redaction、SearchProvider/AIProvider interface
-2. 入力・結果2.0移行/照合、対象選択、dry-run
-3. 決定的query生成とBrave結果normalizer
-4. SSRF・robots・size制限付きHTTP取得器
-5. HTML/JSON/text抽出、時点・source検証、安定ID
-6. AI入力builderとprompt injection境界
-7. OpenAI Structured Outputs adapterと生出力validator
-8. completed派生値・7error変換、状態遷移
-9. JSONL log、cost/retry、lock
-10. 全体orchestrator、原子的保存、停止回復
-11. mock統合試験、明示承認後だけ少数実API smoke test
+1. Gamma `description` / `resolutionSource` 伝播の別設計とレビュー
+2. 収集→候補→14キーanalysis inputまでをテスト先行実装し、実データ検証
+3. 完了契約 `model_info.reasoning_effort` の別設計改訂とレビュー
+4. 設定schema、secret redaction、SearchProvider/AIProvider interface
+5. 入力・結果2.0移行/照合、対象選択、dry-run
+6. 決定的query生成とBrave結果normalizer
+7. SSRF・robots・size制限付きHTTP取得器
+8. HTML/JSON/text抽出、時点・source検証、安定ID
+9. AI入力builderとprompt injection境界
+10. OpenAI Structured Outputs adapterと生出力validator
+11. completed派生値・7error変換、状態遷移
+12. JSONL log、cost/retry、lock
+13. 全体orchestrator、原子的保存、停止回復
+14. mock統合試験、明示承認後だけ1市場の実API smoke test
+15. レビュー済み品質基準に従って3市場、最大10市場へ段階拡大
 
-各commitは依存追加を最小化し、既存4 scriptの契約を変更しない。実API testは費用と
-外部状態を伴うため通常unit testから分離し、secretなしCIでは実行しない。
+1～2の前提工程では既存4 scriptの契約変更を明示し、必要なfixtureと文書を同時更新
+する。4以降の外部AI工程は、承認済み14キー入力契約を再変更しない。全commitで依存
+追加を最小化する。実API testは費用と外部状態を伴うため通常unit testから分離し、
+secretなしCIでは実行しない。
 
 ## 26. テスト観点
 
 ### 26.1 設定・秘密情報
 
 - provider別key未設定、空白、不正provider/model/model versionを全体失敗
+- reasoning effortの6許可値、既定 `low`、未知値、provider非対応
 - temperature/seed/timeout/件数/bytes/token/retry/予算の上下境界
 - dry-runで外部call・結果変更なし
 - API key、Authorization、Cookie、例外原文が結果・log・stdoutにない
@@ -677,6 +761,10 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 
 - 最新入力と同suffix結果を選び、件数・順序・ID・reference time一致
 - 1.0全件pendingから2.0全件pendingへ原子的移行
+- markets/candidatesの `市場説明`・`解決情報源` が値変更なく伝播する
+- `市場説明` のnull・欠落・空白だけを候補から除外し、候補0件を正常扱いする
+- `解決情報源` の欠落/nullを空文字に固定し、空文字を14キー入力で維持する
+- 旧12キーanalysis inputを外部通信前に拒否し、14キーだけを受理する
 - 1.0/2.0混在、未知version、壊れた既存結果を全体失敗
 - pendingだけ処理し、completed/error/未選択pendingをbyte相当で保持
 - 0件 `[]\n`、最大10件、逐次順、途中停止で既存結果不変
@@ -716,6 +804,7 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 - 本文内prompt injectionを指示として実行しない
 - 入力外情報、秘密情報、source外URLをpromptへ混入しない
 - `store: false`、外部toolなし、model/temperature/seed記録
+- reasoning effort `low` をrequest・結果model info・logへ同じ値で記録
 
 ### 26.7 AI出力
 
@@ -751,7 +840,8 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 - 同じ確定分析データから正式JSONがbyte単位一致
 - UTF-8 BOMなし、LF、2-space、固定key/array順、末尾LF、空配列
 - Decimal最大4桁と負のzero正規化
-- 既存81テスト、4 scriptの契約、README、plan、依存を不変に保つ
+- 本設計変更時点は既存81テスト、4 script、README、plan、依存を不変に保つ
+- 前提工程の将来実装では影響する3段CSV/JSON契約と全fixtureを明示更新する
 - mock外部providerでnetwork非依存unit/integration testを行う
 
 ## 27. 自己レビューと未確定境界
@@ -760,6 +850,8 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 
 - completed 17キー、error 12キー、pending 4キーを変更していない
 - `SCHEMA_VERSION = "2.0"` と単一ファイル単一versionを維持した
+- 外部AI実装前に14キーanalysis inputと `model_info.reasoning_effort` の前提改訂が
+  必要であり、現行契約のまま実装しないことを明記した
 - 7種類以外の市場errorを追加していない
 - snippetを正式sourceにせず、2～8件、primary・counter条件を維持した
 - YESだけをAI独立値とし、NO・市場価格・gap・conclusionはコード派生とした
@@ -772,7 +864,8 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 
 - 独立検索＋自前取得は本文検証に必要だが、SSRF/robots/抽出が最大の実装risk
 - 初期content typeとsource種別を狭め、並列・PDF・browserを外した
-- 10市場×4検索、1 retry、token・予算hard capで意図しない課金を制限した
+- 既定1市場、1→3→10の段階ゲート、4検索、1 retry、token・予算hard capで
+  意図しない課金を制限した
 - Brave検索結果は候補発見だけ、OpenAIにはpublisher本文の限定抜粋だけを送る
 - 生本文・model output非保存によりprivacy/copyright riskを減らす一方、完全再現は
   できないことを明示した
@@ -797,6 +890,15 @@ AI生出力までは追跡できない。この境界を完全監査と誤認し
 - 初期provider/modelと差替えinterface、費用・利用条件の注意が明確
 - 完了契約との矛盾がなく、将来テスト観点と最小実装範囲が固定
 - 設計書1ファイルだけが変更され、既存81テストとPython構文確認が成功
+
+ただし「設計書完成」と「外部AI実装開始可能」は別である。次のゲートがすべて完了
+するまで外部AI工程はblockedとする。
+
+1. Gammaの `description` / `resolutionSource` 伝播設計が承認済み
+2. markets CSV→candidates CSV→14キーanalysis inputの実装・全テスト・実データ検証済み
+3. 旧12キー成果物を暗黙使用せず、新パイプラインで再生成済み
+4. 完了契約の `model_info.reasoning_effort` 改訂が承認・実装済み
+5. 1市場実API試験の費用・secret・利用条件が利用者に明示承認済み
 
 設計承認前に実装、依存追加、`.env.example`、`.gitignore`、README、plan、test、
 data、GitHub Actionsを変更しない。承認後も25節の分割順でテスト先行し、実APIを
