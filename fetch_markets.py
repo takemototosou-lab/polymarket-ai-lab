@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import quote
 
 import requests
@@ -388,6 +388,14 @@ def choose_output_path(data_dir: Path, fetched_at: datetime) -> Path:
     return data_dir / f"{stem}_{fetched_at:%S}_{suffix}.csv"
 
 
+def _write_and_sync(handle: BinaryIO, payload: bytes) -> None:
+    written = handle.write(payload)
+    if written != len(payload):
+        raise OSError("一時ファイルへ全バイトを書き込めません")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 def write_csv(rows: list[dict[str, object]], path: Path) -> None:
     """CSVをUTF-8 BOM付きで新規保存する。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,12 +422,9 @@ def write_csv(rows: list[dict[str, object]], path: Path) -> None:
         )
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = None
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.exists():
-            raise FileExistsError(path)
-        os.replace(temporary_path, path)
+            _write_and_sync(handle, payload)
+        os.link(temporary_path, path)
+        os.unlink(temporary_path)
         temporary_path = None
     except BaseException:
         if descriptor is not None:
@@ -486,8 +491,13 @@ def collect_snapshot(
     rows = select_rows(candidates, midpoints, fetched_at)
     if not rows:
         raise RuntimeError("有効なCLOB価格を持つ市場が0件です")
-    output_path = choose_output_path(data_dir, fetched_at)
-    write_csv(rows, output_path)
+    while True:
+        output_path = choose_output_path(data_dir, fetched_at)
+        try:
+            write_csv(rows, output_path)
+        except FileExistsError:
+            continue
+        break
     return output_path, len(rows)
 
 

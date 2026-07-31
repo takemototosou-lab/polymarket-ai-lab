@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -459,6 +460,14 @@ def candidate_output_path(
     )
 
 
+def _write_and_sync(handle: BinaryIO, payload: bytes) -> None:
+    written = handle.write(payload)
+    if written != len(payload):
+        raise OSError("一時ファイルへ全バイトを書き込めません")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 def write_candidate_csv(
     path: Path,
     selected: list[Candidate],
@@ -496,9 +505,7 @@ def write_candidate_csv(
         )
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = None
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+            _write_and_sync(handle, payload)
         os.replace(temporary_path, path)
         temporary_path = None
     except BaseException:

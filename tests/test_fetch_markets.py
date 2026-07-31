@@ -2,6 +2,7 @@ import codecs
 import csv
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -11,6 +12,28 @@ from unittest.mock import patch
 
 import fetch_markets
 import requests
+
+
+class ShortWriteHandle:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        os.close(self.descriptor)
+
+    def write(self, payload):
+        written = max(1, len(payload) // 2)
+        os.write(self.descriptor, payload[:written])
+        return written
+
+    def flush(self):
+        pass
+
+    def fileno(self):
+        return self.descriptor
 
 
 def make_market(**overrides):
@@ -484,15 +507,85 @@ class CsvOutputTests(unittest.TestCase):
             self.assertEqual("markets_2026-07-30_2000_45_1.csv", third.name)
             self.assertFalse(third.exists())
 
-    def test_replace_failure_does_not_publish_partial_csv(self):
+    def test_link_failure_does_not_publish_partial_csv(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "markets.csv"
 
-            with patch("os.replace", side_effect=OSError("replace failed")):
-                with self.assertRaisesRegex(OSError, "replace failed"):
+            with patch("os.link", side_effect=OSError("link failed")):
+                with self.assertRaisesRegex(OSError, "link failed"):
                     fetch_markets.write_csv([make_csv_row("Market?")], path)
 
             self.assertFalse(path.exists())
+            self.assertEqual([], list(path.parent.glob(".*.tmp")))
+
+    def test_concurrent_creation_reselects_path_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            fetched_at = datetime(
+                2026, 7, 30, 20, 0, 45, tzinfo=timezone.utc
+            )
+            first_path = data_dir / "markets_2026-07-30_2000.csv"
+            competing_payload = b"competing snapshot"
+            real_link = os.link
+            link_calls = 0
+
+            def create_competing_file_then_link(source, destination):
+                nonlocal link_calls
+                link_calls += 1
+                if link_calls == 1:
+                    Path(destination).write_bytes(competing_payload)
+                real_link(source, destination)
+
+            with (
+                patch(
+                    "fetch_markets.collect_candidates",
+                    return_value=[make_candidate("1", 20_000, ("yes", "no"))],
+                ),
+                patch(
+                    "fetch_markets.fetch_midpoints",
+                    return_value={"yes": 0.4, "no": 0.6},
+                ),
+                patch(
+                    "fetch_markets.os.link",
+                    side_effect=create_competing_file_then_link,
+                ),
+            ):
+                output_path, count = fetch_markets.collect_snapshot(
+                    object(), fetched_at, data_dir
+                )
+
+            self.assertEqual(1, count)
+            self.assertEqual(competing_payload, first_path.read_bytes())
+            self.assertEqual(
+                "markets_2026-07-30_2000_45.csv",
+                output_path.name,
+            )
+            self.assertTrue(output_path.read_bytes().startswith(codecs.BOM_UTF8))
+            self.assertEqual([], list(data_dir.glob(".*.tmp")))
+
+    def test_short_write_does_not_publish_or_leave_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "markets.csv"
+
+            with patch(
+                "fetch_markets.os.fdopen",
+                side_effect=lambda descriptor, mode: ShortWriteHandle(descriptor),
+            ):
+                with self.assertRaisesRegex(OSError, "全バイト"):
+                    fetch_markets.write_csv([make_csv_row("Market?")], path)
+
+            self.assertFalse(path.exists())
+            self.assertEqual([], list(path.parent.glob(".*.tmp")))
+
+    def test_existing_snapshot_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "markets.csv"
+            path.write_bytes(b"existing snapshot")
+
+            with self.assertRaises(FileExistsError):
+                fetch_markets.write_csv([make_csv_row("Market?")], path)
+
+            self.assertEqual(b"existing snapshot", path.read_bytes())
             self.assertEqual([], list(path.parent.glob(".*.tmp")))
 
 

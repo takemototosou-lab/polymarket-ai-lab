@@ -1,6 +1,7 @@
 import codecs
 import csv
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -9,6 +10,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 import select_candidates
+
+
+class ShortWriteHandle:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        os.close(self.descriptor)
+
+    def write(self, payload):
+        written = max(1, len(payload) // 2)
+        os.write(self.descriptor, payload[:written])
+        return written
+
+    def flush(self):
+        pass
+
+    def fileno(self):
+        return self.descriptor
 
 
 FETCHED_AT = datetime.fromisoformat("2026-07-30T12:00:00+09:00")
@@ -415,6 +438,25 @@ class WorkflowTests(unittest.TestCase):
 
             with patch("os.replace", side_effect=OSError("replace failed")):
                 with self.assertRaisesRegex(OSError, "replace failed"):
+                    select_candidates.write_candidate_csv(path, [candidate])
+
+            self.assertEqual(b"existing", path.read_bytes())
+            self.assertEqual([], list(data_dir.glob(".*.tmp")))
+
+    def test_short_write_preserves_existing_candidate_csv_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            path = data_dir / "candidates_2026-07-30_1200.csv"
+            path.write_bytes(b"existing")
+            candidate = select_candidates.prepare_candidates(
+                [make_row()], FETCHED_AT
+            )[0]
+
+            with patch(
+                "select_candidates.os.fdopen",
+                side_effect=lambda descriptor, mode: ShortWriteHandle(descriptor),
+            ):
+                with self.assertRaisesRegex(OSError, "全バイト"):
                     select_candidates.write_candidate_csv(path, [candidate])
 
             self.assertEqual(b"existing", path.read_bytes())
