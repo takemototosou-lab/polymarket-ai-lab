@@ -1,4 +1,5 @@
 import codecs
+import hashlib
 import io
 import json
 import os
@@ -12,6 +13,28 @@ import analyze_market
 
 
 REFERENCE_TIME = "2026-07-30T22:04:49.568055+09:00"
+
+
+class ShortWriteHandle:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        os.close(self.descriptor)
+
+    def write(self, payload):
+        written = max(1, len(payload) // 2)
+        os.write(self.descriptor, payload[:written])
+        return written
+
+    def flush(self):
+        pass
+
+    def fileno(self):
+        return self.descriptor
 
 
 def make_input_record(
@@ -45,6 +68,135 @@ def write_analysis_input(
     records,
     *,
     name="analysis_input_2026-07-30_2204.json",
+) -> Path:
+    path = data_dir / name
+    payload = (
+        json.dumps(records, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    path.write_bytes(payload)
+    return path
+
+
+def make_result_record(
+    *,
+    schema_version="1.0",
+    market_id="1",
+    analysis_reference_time=REFERENCE_TIME,
+    status="pending",
+    **extra,
+):
+    record = {
+        "schema_version": schema_version,
+        "market_id": market_id,
+        "analysis_reference_time": analysis_reference_time,
+        "status": status,
+    }
+    record.update(extra)
+    return record
+
+
+def make_completed_result_record(*, market_id="1"):
+    record = make_result_record(
+        schema_version="2.0",
+        market_id=market_id,
+        status="completed",
+    )
+    record.update(
+        {
+            "yes_probability": 0.6,
+            "no_probability": 0.4,
+            "market_yes_price": 0.5,
+            "probability_gap": 0.1,
+            "conclusion": "yes_above_market",
+            "confidence": "medium",
+            "evidence": [{"text": "support", "source_ids": ["S1"]}],
+            "counter_evidence": [
+                {"text": "counter", "source_ids": ["S2"]}
+            ],
+            "counter_evidence_assessment": {
+                "status": "found",
+                "summary": "counter evidence was found",
+            },
+            "sources": [
+                {
+                    "source_id": "S1",
+                    "url": "https://example.com/a",
+                    "canonical_url": "https://example.com/a",
+                    "title": "A",
+                    "publisher": "Publisher A",
+                    "published_at": None,
+                    "published_at_precision": "unknown",
+                    "retrieved_at": "2026-07-30T13:05:00.000000Z",
+                    "source_type": "secondary",
+                    "stance": "support",
+                    "relevance": "support",
+                },
+                {
+                    "source_id": "S2",
+                    "url": "https://example.org/b",
+                    "canonical_url": "https://example.org/b",
+                    "title": "B",
+                    "publisher": "Publisher B",
+                    "published_at": None,
+                    "published_at_precision": "unknown",
+                    "retrieved_at": "2026-07-30T13:05:00.000000Z",
+                    "source_type": "secondary",
+                    "stance": "counter",
+                    "relevance": "counter",
+                },
+            ],
+            "primary_source_status": "not_applicable",
+            "model_info": {
+                "provider": "fixture",
+                "model": "fixture",
+                "model_version": None,
+                "prompt_version": "1.0",
+                "temperature": None,
+                "seed": None,
+                "tools_used": ["web_search", "source_retrieval"],
+                "search_provider": "fixture",
+            },
+            "analysis_executed_at": "2026-07-30T13:05:00.000000Z",
+        }
+    )
+    return record
+
+
+def make_error_result_record(*, market_id="1"):
+    record = make_result_record(
+        schema_version="2.0",
+        market_id=market_id,
+        status="error",
+    )
+    record.update(
+        {
+            "error_code": "timeout",
+            "error_category": "external_dependency",
+            "error_message": "analysis timed out",
+            "retryable": True,
+            "failed_stage": "model",
+            "analysis_attempted_at": "2026-07-30T13:05:00.000000Z",
+            "model_info": {
+                "provider": "fixture",
+                "model": "fixture",
+                "model_version": None,
+                "prompt_version": "1.0",
+                "temperature": None,
+                "seed": None,
+                "tools_used": [],
+                "search_provider": None,
+            },
+            "external_search_used": False,
+        }
+    )
+    return record
+
+
+def write_analysis_result(
+    data_dir: Path,
+    records,
+    *,
+    name="analysis_result_2026-07-30_2204.json",
 ) -> Path:
     path = data_dir / name
     payload = (
@@ -395,9 +547,9 @@ class PendingResultTests(unittest.TestCase):
 
         results = analyze_market.build_pending_results(records)
 
-        self.assertEqual("1.0", analyze_market.SCHEMA_VERSION)
+        self.assertEqual("2.0", analyze_market.SCHEMA_VERSION)
         self.assertEqual(
-            {"1.0"},
+            {"2.0"},
             {item["schema_version"] for item in results},
         )
         self.assertNotEqual(
@@ -418,7 +570,7 @@ class SerializationTests(unittest.TestCase):
 
     def test_serializes_fixed_key_order_utf8_and_lf(self):
         record = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "market_id": '日本語 "id" \\ path\nnext',
             "analysis_reference_time": REFERENCE_TIME,
             "status": "pending",
@@ -458,8 +610,261 @@ class SerializationTests(unittest.TestCase):
         )
 
 
+class ExistingResultMigrationTests(unittest.TestCase):
+    def test_creates_v2_pending_without_existing_result_deterministically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_analysis_input(
+                data_dir,
+                [
+                    make_input_record(market_id="2"),
+                    make_input_record(market_id="1"),
+                ],
+            )
+            source_before = source.read_bytes()
+
+            first_path, first_count = analyze_market.run(data_dir)
+            first_bytes = first_path.read_bytes()
+            first_hash = hashlib.sha256(first_bytes).hexdigest()
+            second_path, second_count = analyze_market.run(data_dir)
+            second_bytes = second_path.read_bytes()
+
+            self.assertEqual((2, 2), (first_count, second_count))
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(first_hash, hashlib.sha256(second_bytes).hexdigest())
+            self.assertEqual(first_bytes, second_bytes)
+            self.assertEqual(source_before, source.read_bytes())
+            self.assertEqual(
+                ["2", "1"],
+                [item["market_id"] for item in json.loads(second_bytes)],
+            )
+            self.assertEqual(
+                {"2.0"},
+                {item["schema_version"] for item in json.loads(second_bytes)},
+            )
+
+    def test_migrates_all_legacy_pending_results_to_v2_at_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_analysis_input(
+                data_dir,
+                [
+                    make_input_record(market_id="1"),
+                    make_input_record(market_id="2"),
+                ],
+            )
+            output = write_analysis_result(
+                data_dir,
+                [
+                    make_result_record(market_id="1"),
+                    make_result_record(market_id="2"),
+                ],
+            )
+            legacy_bytes = output.read_bytes()
+
+            result_path, count = analyze_market.run(data_dir)
+            parsed = json.loads(result_path.read_bytes())
+
+            self.assertEqual(2, count)
+            self.assertNotEqual(legacy_bytes, result_path.read_bytes())
+            self.assertEqual(["1", "2"], [item["market_id"] for item in parsed])
+            self.assertEqual({"2.0"}, {item["schema_version"] for item in parsed})
+            self.assertTrue(all(item["status"] == "pending" for item in parsed))
+            self.assertTrue(
+                all(list(item) == list(analyze_market.RESULT_KEYS) for item in parsed)
+            )
+
+    def test_accepts_existing_v2_pending_and_recreates_identical_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_analysis_input(data_dir, [make_input_record()])
+            output = write_analysis_result(
+                data_dir,
+                [make_result_record(schema_version="2.0")],
+            )
+            before = output.read_bytes()
+
+            result_path, count = analyze_market.run(data_dir)
+
+            self.assertEqual(1, count)
+            self.assertEqual(before, result_path.read_bytes())
+
+    def test_rejects_invalid_existing_results_without_modifying_them(self):
+        valid_legacy = [
+            make_result_record(market_id="1"),
+            make_result_record(market_id="2"),
+        ]
+        missing_status = dict(valid_legacy[0])
+        del missing_status["status"]
+        missing_version = dict(valid_legacy[0])
+        del missing_version["schema_version"]
+        wrong_order = {
+            "market_id": "1",
+            "schema_version": "1.0",
+            "analysis_reference_time": REFERENCE_TIME,
+            "status": "pending",
+        }
+        cases = (
+            ("count", [valid_legacy[0]]),
+            (
+                "market_id",
+                [make_result_record(market_id="x"), valid_legacy[1]],
+            ),
+            (
+                "order",
+                [
+                    make_result_record(market_id="2"),
+                    make_result_record(market_id="1"),
+                ],
+            ),
+            (
+                "reference_time",
+                [
+                    make_result_record(
+                        market_id="1",
+                        analysis_reference_time="2026-07-30T13:04:49.568055Z",
+                    ),
+                    valid_legacy[1],
+                ],
+            ),
+            (
+                "completed",
+                [make_completed_result_record(), valid_legacy[1]],
+            ),
+            (
+                "error",
+                [make_error_result_record(), valid_legacy[1]],
+            ),
+            (
+                "completed_pending_mixed",
+                [make_completed_result_record(), valid_legacy[1]],
+            ),
+            (
+                "error_pending_mixed",
+                [make_error_result_record(), valid_legacy[1]],
+            ),
+            (
+                "unknown_key",
+                [make_result_record(extra_value="x"), valid_legacy[1]],
+            ),
+            (
+                "v2_unknown_key",
+                [
+                    make_result_record(
+                        schema_version="2.0",
+                        extra_value="x",
+                    ),
+                    make_result_record(
+                        schema_version="2.0",
+                        market_id="2",
+                    ),
+                ],
+            ),
+            ("missing_key", [missing_status, valid_legacy[1]]),
+            (
+                "wrong_schema_type",
+                [make_result_record(schema_version=2), valid_legacy[1]],
+            ),
+            (
+                "bool_schema",
+                [make_result_record(schema_version=True), valid_legacy[1]],
+            ),
+            (
+                "wrong_status_type",
+                [make_result_record(status=True), valid_legacy[1]],
+            ),
+            (
+                "v2_status_not_pending",
+                [
+                    make_result_record(
+                        schema_version="2.0",
+                        status="completed",
+                    ),
+                    make_result_record(
+                        schema_version="2.0",
+                        market_id="2",
+                    ),
+                ],
+            ),
+            (
+                "mixed_versions",
+                [
+                    valid_legacy[0],
+                    make_result_record(schema_version="2.0", market_id="2"),
+                ],
+            ),
+            (
+                "unknown_version",
+                [make_result_record(schema_version="9.0"), valid_legacy[1]],
+            ),
+            ("missing_version", [missing_version, valid_legacy[1]]),
+            ("wrong_key_order", [wrong_order, valid_legacy[1]]),
+        )
+
+        for name, existing_results in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    data_dir = Path(directory)
+                    write_analysis_input(
+                        data_dir,
+                        [
+                            make_input_record(market_id="1"),
+                            make_input_record(market_id="2"),
+                        ],
+                    )
+                    output = write_analysis_result(data_dir, existing_results)
+                    before = output.read_bytes()
+
+                    with self.assertRaises(ValueError):
+                        analyze_market.run(data_dir)
+
+                    self.assertEqual(before, output.read_bytes())
+
+    def test_rejects_duplicate_keys_in_existing_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            write_analysis_input(data_dir, [make_input_record()])
+            output = write_analysis_result(data_dir, [make_result_record()])
+            text = output.read_text(encoding="utf-8")
+            output.write_text(
+                text.replace(
+                    '"market_id": "1",',
+                    '"market_id": "1",\n    "market_id": "2",',
+                    1,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            before = output.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "重複"):
+                analyze_market.run(data_dir)
+
+            self.assertEqual(before, output.read_bytes())
+
+    def test_replace_failure_preserves_valid_legacy_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            source = write_analysis_input(data_dir, [make_input_record()])
+            source_before = source.read_bytes()
+            output = write_analysis_result(data_dir, [make_result_record()])
+            legacy_bytes = output.read_bytes()
+
+            with patch.object(
+                analyze_market.os,
+                "replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    analyze_market.run(data_dir)
+
+            self.assertEqual(legacy_bytes, output.read_bytes())
+            self.assertEqual(source_before, source.read_bytes())
+            self.assertEqual([], list(data_dir.glob(".*.tmp")))
+
+
 class WorkflowTests(unittest.TestCase):
-    def test_run_replaces_output_and_preserves_source(self):
+    def test_run_creates_output_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory)
             source = write_analysis_input(
@@ -467,15 +872,16 @@ class WorkflowTests(unittest.TestCase):
                 [make_input_record()],
             )
             source_before = source.read_bytes()
-            output = data_dir / "analysis_result_2026-07-30_2204.json"
-            output.write_bytes(b"old")
 
             first_path, first_count = analyze_market.run(data_dir)
             first_bytes = first_path.read_bytes()
             second_path, second_count = analyze_market.run(data_dir)
 
             self.assertEqual((1, 1), (first_count, second_count))
-            self.assertEqual(output, first_path)
+            self.assertEqual(
+                data_dir / "analysis_result_2026-07-30_2204.json",
+                first_path,
+            )
             self.assertEqual(first_path, second_path)
             self.assertEqual(first_bytes, second_path.read_bytes())
             self.assertEqual(source_before, source.read_bytes())
@@ -503,6 +909,40 @@ class WorkflowTests(unittest.TestCase):
                 side_effect=OSError("write failed"),
             ):
                 with self.assertRaisesRegex(OSError, "write failed"):
+                    analyze_market.atomic_write(path, b"new")
+
+            self.assertEqual(b"old", path.read_bytes())
+            self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    def test_short_write_preserves_existing_output_and_removes_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_result_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                analyze_market.os,
+                "fdopen",
+                side_effect=lambda descriptor, _mode: ShortWriteHandle(
+                    descriptor
+                ),
+            ):
+                with self.assertRaises(OSError):
+                    analyze_market.atomic_write(path, b"new payload")
+
+            self.assertEqual(b"old", path.read_bytes())
+            self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    def test_fsync_failure_preserves_existing_output_and_removes_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis_result_2026-07-30_2204.json"
+            path.write_bytes(b"old")
+
+            with patch.object(
+                analyze_market.os,
+                "fsync",
+                side_effect=OSError("fsync failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "fsync failed"):
                     analyze_market.atomic_write(path, b"new")
 
             self.assertEqual(b"old", path.read_bytes())

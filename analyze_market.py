@@ -34,7 +34,11 @@ RESULT_KEYS = (
     "status",
 )
 
-SCHEMA_VERSION = "1.0"
+LEGACY_SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
+SUPPORTED_PENDING_SCHEMA_VERSIONS = frozenset(
+    (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION)
+)
 
 STRING_INPUT_KEYS = frozenset(
     (
@@ -238,6 +242,81 @@ def load_analysis_inputs(path: Path) -> list[dict[str, object]]:
     return records
 
 
+def load_existing_pending_results(
+    path: Path,
+) -> list[dict[str, str]]:
+    payload = path.read_bytes()
+    if payload.startswith(codecs.BOM_UTF8):
+        raise ValueError("既存の分析結果JSONにUTF-8 BOMは使用できません")
+
+    try:
+        text = payload.decode("utf-8", errors="strict")
+        parsed = json.loads(
+            text,
+            parse_float=Decimal,
+            parse_int=Decimal,
+            parse_constant=_reject_non_finite_constant,
+            object_pairs_hook=_object_without_duplicate_keys,
+        )
+    except UnicodeError:
+        raise ValueError("既存の分析結果JSONがUTF-8ではありません") from None
+    except json.JSONDecodeError:
+        raise ValueError("既存の分析結果JSONが不正です") from None
+
+    if not isinstance(parsed, list):
+        raise ValueError("既存の分析結果JSONのトップレベルが配列ではありません")
+
+    records: list[dict[str, str]] = []
+    versions: set[str] = set()
+    for element_number, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"既存の分析結果JSONの{element_number}番目がオブジェクトではありません"
+            )
+        if tuple(item) != RESULT_KEYS:
+            raise ValueError(
+                f"既存の分析結果JSONの{element_number}番目のキーが不正です"
+            )
+        if any(not isinstance(item[key], str) for key in RESULT_KEYS):
+            raise ValueError(
+                f"既存の分析結果JSONの{element_number}番目の型が不正です"
+            )
+        if item["schema_version"] not in SUPPORTED_PENDING_SCHEMA_VERSIONS:
+            raise ValueError("既存の分析結果JSONのschema_versionが不正です")
+        if item["status"] != "pending":
+            raise ValueError("pending以外の既存分析結果は移行できません")
+        versions.add(item["schema_version"])
+        records.append(item)
+
+    if len(versions) > 1:
+        raise ValueError("既存の分析結果JSON内でschema_versionが混在しています")
+    return records
+
+
+def validate_existing_pending_results(
+    existing_records: list[dict[str, str]],
+    input_records: list[dict[str, object]],
+) -> None:
+    if len(existing_records) != len(input_records):
+        raise ValueError("既存の分析結果JSONの市場件数が分析入力と一致しません")
+
+    for element_number, (existing, source) in enumerate(
+        zip(existing_records, input_records),
+        start=1,
+    ):
+        if existing["market_id"] != source["市場ID"]:
+            raise ValueError(
+                f"既存の分析結果JSONの{element_number}番目の市場IDが一致しません"
+            )
+        if (
+            existing["analysis_reference_time"]
+            != source["分析基準日時"]
+        ):
+            raise ValueError(
+                f"既存の分析結果JSONの{element_number}番目の分析基準日時が一致しません"
+            )
+
+
 def build_pending_results(
     records: list[dict[str, object]],
 ) -> list[dict[str, str]]:
@@ -317,6 +396,9 @@ def run(data_dir: Path) -> tuple[Path, int]:
     input_path = find_latest_analysis_input(data_dir)
     output_path = output_path_for(input_path)
     input_records = load_analysis_inputs(input_path)
+    if output_path.exists():
+        existing_records = load_existing_pending_results(output_path)
+        validate_existing_pending_results(existing_records, input_records)
     results = build_pending_results(input_records)
     payload = serialize_analysis_results(results)
     atomic_write(output_path, payload)

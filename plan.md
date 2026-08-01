@@ -49,7 +49,10 @@ AI予測へ進む前に、市場価格を再現可能な時刻付きスナップ
 - [x] 未知キーを許容しつつ、全オブジェクト階層の重複JSONキーを拒否
 - [x] `+09:00`と`Z`を受理するタイムゾーン付きISO 8601検証
 - [x] 入力順と1対1対応を維持した全市場`pending`出力
-- [x] `SCHEMA_VERSION = "1.0"`と`RESULT_KEYS`によるバージョン・4キー順の一元管理
+- [x] `SCHEMA_VERSION = "2.0"`と`RESULT_KEYS`によるバージョン・4キー順の一元管理
+- [x] 全件1.0 pendingの検証と2.0 pendingへの原的一括移行
+- [x] 全件2.0 pendingの検証・決定的再生成
+- [x] version混在・未知version・不正結果・`completed`・`error`の安全な拒否
 - [x] 入力の`schema_version`を継承しない責務境界
 - [x] UTF-8 BOMなし・LF・2スペース・末尾LFの固定出力
 - [x] 分析結果0件の正確な`[]\n`出力・正常終了
@@ -137,7 +140,22 @@ AI予測へ進む前に、市場価格を再現可能な時刻付きスナップ
 - 単体テスト: 全101件に成功
 
 候補0件のため実データJSONは空配列だが、非空metadataの14列・14キー伝播、
-multiline、旧形式拒否、pending 1.0維持は単体テストfixtureで確認している。
+multiline、旧形式拒否、伝播工程時点のpending 1.0維持は単体テストfixtureで確認した。
+
+## pending schema 2.0移行の実データ検証
+
+- 検証場所: 一時data directory（既存data成果物は変更なし）
+- 公開Gamma / CLOB APIから市場100件を取得
+- markets CSV: 11列、candidates CSV: 14列
+- 候補件数: 0件（厳格条件を緩和せず正常終了）
+- analysis input / 2.0 pending結果: どちらも正確な`5B 5D 0A`（`[]\n`）
+- 結果SHA-256: 2回とも`37517E5F3DC66819F61F5A7BB8ACE1921282415F10551D2DEFA5C3EB0985B570`
+- markets / candidates / analysis inputのSHA-256: 実行前後で不変
+- 隔離した1件fixture: 全件1.0 pendingから2.0 pendingへ一括移行
+- fixture再実行: 2.0結果のSHA-256一致、分析入力SHA-256不変
+- 単体テスト: 全109件に成功
+
+候補0件は正常系であり、条件緩和は行わない。2.0 pendingは4キーのままで、外部検索、AI推論、`completed`、`error`、売買は実装していない。
 
 ## 公共仕様との差異
 
@@ -151,7 +169,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] `completed`・`error`とAI分析結果項目の次期契約を設計
 - [x] 外部検索・AI分析パイプラインを設計
 - [x] 市場説明・解決情報源を11列→14列→14キーへ伝播
-- [ ] `SCHEMA_VERSION = "2.0"`のpending移行と外部AI実装
+- [x] `SCHEMA_VERSION = "2.0"`へpending結果を移行
+- [ ] 外部AI実装
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
 - [ ] 決着後に精度と収益性を評価
