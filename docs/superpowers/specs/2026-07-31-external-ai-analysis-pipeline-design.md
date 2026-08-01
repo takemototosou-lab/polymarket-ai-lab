@@ -84,11 +84,27 @@ Gamma API description / resolutionSource
 analysis input、2.0 pending結果を順に再生成する。前提工程の全テストと実データ検証が
 完了するまで、本仕様の実装開始ゲートは閉じたままとする。
 
+### 2.4 段階実装
+
+外部AI工程は、外部通信を含まないfoundationと実通信を同時に導入せず、次の3段階に
+分ける。後段の契約を前段へ暗黙に持ち込まない。
+
+| Phase | 範囲 | 外部通信・正式結果更新 |
+| --- | --- | --- |
+| Phase 1 | 設定読込、市場数上限、dry-run、provider境界、fake provider、入力・2.0 pending照合 | 禁止 |
+| Phase 2 | safe URL fetcher、SSRF防御、Brave Search候補取得、本文取得、log・lock・retry基盤 | Phase 2の個別ゲート承認後だけ許可。completed/errorは生成しない |
+| Phase 3 | OpenAI provider、Structured Outputs、completed/error構築、1市場実API検証 | Phase 3の個別ゲート承認後だけ許可 |
+
+Phase 1は `run_external_analysis.py` を新しい入口とし、既存
+`analyze_market.py` のpending契約機としての責務を広げない。Phase 1の実装開始が
+許可されても、Phase 2・3のネットワーク、APIキー、状態遷移、結果更新が許可された
+ことにはならない。
+
 ## 3. 外部サービスの採用方針
 
 ### 3.1 検索方式
 
-初期実装は **Brave Search API Web Searchを候補発見だけに使用し、リンク先を
+Phase 2は **Brave Search API Web Searchを候補発見だけに使用し、リンク先を
 本プロジェクトの安全なHTTP取得器で取得する方式**を採用する。
 
 | 方式 | 長所 | 制約 | 初期判断 |
@@ -116,16 +132,18 @@ AIへ渡さず、検索結果データベースを作らない。Braveの規約�
 
 ### 3.2 AI方式
 
-初期実装は **OpenAI Responses API、`gpt-5.6-terra`、Structured Outputsの
-厳格なJSON Schema**を採用する。Terraは公式に知能と費用の均衡用途とされ、
-構造化出力を利用できる。2026-07-31再レビュー時、同じ公式モデルページの直接取得と
-検索cacheで料金表示に差異が確認されたため、具体的単価を契約定数にしない。実装時と
-各実行前に公式料金を再確認し、承認済み料金設定なしでは課金callを開始しない。
-[GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+Phase 3は **OpenAI Responses APIとStructured Outputsの
+厳格なJSON Schema**を採用する。2026-07-31時点ではTerraを候補として調査したが、
+これは過去時点の参考記録であり、Phase 3の採用モデルを固定・決定するものではない。
+同日の再レビューでは、同じ公式モデルページの直接取得と検索cacheで料金表示に差異が
+確認されたため、具体的単価を契約定数にしない。実装時と各実行前に公式のモデル仕様と
+料金を再確認し、承認済みモデル・料金設定なしでは課金callを開始しない。
+[GPT-5.6 Terra（2026-07-31時点の調査候補）](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
 
-初期品質評価で契約充足率が不足する場合だけ `gpt-5.6-sol` を比較し、費用を
-理由なく上げない。Lunaは費用比較対象だが、最初の基準モデルにはしない。
-モデル名は設定可能とするが、許可リストと対応機能を起動時に検証する。
+モデル名、利用可能性、Structured Outputs・reasoning effort対応、料金はPhase 3の
+実装時点で公式情報を再確認し、設計書に記載した過去のモデル名を永久固定値として
+扱わない。Phase 3の実装前レビューで初期モデルと必要な比較対象を選び、費用を
+理由なく上げない。モデル名は設定可能とするが、許可リストと対応機能を起動時に検証する。
 
 Responses APIでは `store: false`、外部ツールなし、単発リクエストを使う。
 AIに検索やURL取得をさせない。Structured OutputsはJSON Schemaへの適合を
@@ -143,89 +161,140 @@ reasoning effortとともに受け、構造化生出力と使用量メタデー�
 
 ## 4. 設定・環境変数契約
 
-設定は起動時に全件読取り、型・範囲・プロバイダ組合せを外部通信前に検証
-する。不正・不足は市場単位errorではなく終了コード1のファイル全体失敗。
+設定は起動時にmappingから読取り、型・範囲・Phaseの組合せを処理開始前に
+検証する。暗黙のtrim、case変換、部分一致、clampを行わない。
 
-| 環境変数 | 初期値 / 制約 |
+### 4.1 Phase 1設定
+
+Phase 1が読む環境変数は次の4件だけとする。APIキー、検索設定、モデル名、timeout、
+retry、予算設定は読まない。
+
+| 環境変数 | Phase 1の初期値 / 制約 |
 | --- | --- |
-| `POLYMARKET_SEARCH_PROVIDER` | 必須、初期許可値 `brave` |
-| `POLYMARKET_BRAVE_SEARCH_API_KEY` | Brave時必須、空白不可 |
-| `POLYMARKET_AI_PROVIDER` | 必須、初期許可値 `openai` |
-| `POLYMARKET_OPENAI_API_KEY` | OpenAI時必須、空白不可 |
-| `POLYMARKET_AI_MODEL` | 既定 `gpt-5.6-terra`、許可リスト方式 |
-| `POLYMARKET_AI_MODEL_VERSION` | 任意の期待version。providerが返す値との一致検証用 |
-| `POLYMARKET_AI_REASONING_EFFORT` | 既定 `low`。`none`、`low`、`medium`、`high`、`xhigh`、`max` |
-| `POLYMARKET_AI_TEMPERATURE` | 既定 `0`、0以上2以下の有限Decimal |
-| `POLYMARKET_AI_SEED` | 既定未指定。対応時のみ64-bit整数 |
-| `POLYMARKET_PROMPT_VERSION` | 必須、初期 `1.0`、`MAJOR.MINOR` |
-| `POLYMARKET_SEARCH_TIMEOUT_SECONDS` | 既定15、1以上60以下 |
-| `POLYMARKET_FETCH_TIMEOUT_SECONDS` | 既定15、1以上60以下 |
-| `POLYMARKET_AI_TIMEOUT_SECONDS` | 既定90、10以上300以下 |
-| `POLYMARKET_RUN_TIMEOUT_SECONDS` | 既定1200、60以上3600以下 |
-| `POLYMARKET_MAX_MARKETS_PER_RUN` | 既定1、1以上10以下 |
-| `POLYMARKET_MAX_SEARCH_QUERIES_PER_MARKET` | 既定4、1以上6以下 |
-| `POLYMARKET_MAX_RESULTS_PER_QUERY` | 既定5、1以上10以下 |
-| `POLYMARKET_MAX_FETCHES_PER_MARKET` | 既定8、2以上12以下 |
-| `POLYMARKET_MAX_RESPONSE_BYTES` | 既定2097152、65536以上4194304以下 |
-| `POLYMARKET_MAX_SOURCE_CHARS` | 既定12000、1000以上20000以下 |
-| `POLYMARKET_MAX_TOTAL_SOURCE_CHARS` | 既定60000、2000以上80000以下 |
-| `POLYMARKET_MAX_AI_INPUT_TOKENS` | 既定32000、4096以上64000以下 |
-| `POLYMARKET_MAX_AI_OUTPUT_TOKENS` | 既定4096、512以上8192以下 |
-| `POLYMARKET_MAX_RETRIES` | 既定1、0以上2以下。初回を含め最大2回 |
-| `POLYMARKET_RETRY_BASE_SECONDS` | 既定1、0.1以上10以下 |
-| `POLYMARKET_MAX_RUN_COST_USD` | 既定2.00、正の有限Decimal |
-| `POLYMARKET_AI_DRY_RUN` | 既定false、`true` / `false` のみ |
+| `POLYMARKET_AI_PROVIDER` | 未設定時 `fake`。受理値は厳密な `fake` のみ |
+| `POLYMARKET_AI_DRY_RUN` | 未設定時 `true`。受理値は厳密な `true` / `false` |
+| `POLYMARKET_MAX_MARKETS_PER_RUN` | 未設定時 `1`。1以上10以下、hard max 10 |
+| `POLYMARKET_AI_REASONING_EFFORT` | 未設定時 `low`。`low` / `medium` / `high` |
 
-プロバイダ料金は変更されるため、費用上限だけに安全性を依存しない。
-検索回数・取得数・token数・retry数もハード上限とし、予測費用が予算上限を
-超える呼出しは開始しない。レスポンス使用量と検索成功回数から実績見積りを
-更新し、次の呼出しが上限を超える場合は新規課金を止める。
+`POLYMARKET_AI_PROVIDER=openai` は既知の将来providerだがPhase 1では段階未到達として
+終了コード3で拒否する。その他の未知値、大文字表記、前後空白付き表記は設定不正として
+終了コード1で拒否する。fake providerはprovider protocolの境界試験用であり、予測、
+AI文章、completed/error、外部通信を生成しない。APIキー環境変数を参照しない。
 
-dry-runは入力・既存結果・設定・対象選択・クエリ生成・予算事前計算までを
-行い、外部通信、状態遷移、正式結果置換を行わない。ログはdry-runと明示する。
+`POLYMARKET_AI_DRY_RUN=true` は実行計画だけを決定的に構築し、providerを呼ばず、
+dataファイル、ログ、一時ファイル、lockを作成・変更しない。`false` は値として解析後、
+Phase 1では段階未到達として終了コード3で拒否し、外部通信へ進まない。`1`、`0`、
+`yes`、`no`、大文字表記、空文字、前後空白付き表記を拒否する。
 
-将来の実装で `.env.example` に変数名とダミー値だけを追加してよいが、同じ
-変更で `.env` を `.gitignore` 対象にしてから利用する。APIキー、Cookie、
-秘密鍵、AuthorizationヘッダーをJSON、ログ、例外、README例へ出さない。
+`POLYMARKET_MAX_MARKETS_PER_RUN` はASCII数字による通常の10進整数表記だけを受理する。
+`0`、負数、11以上、空文字、小数、指数表記、`+1`、`01`、前後空白付き表記を拒否し、
+丸めやclampを行わない。対象となるpendingの入力順先頭から適用し、利用者の明示設定で
+1市場、3市場、最大10市場へ段階拡大できる。
 
-GPT-5.6では `reasoning.effort` を意図的に指定する。初期値は費用・latencyを抑える
-`low` とし、代表市場の評価で契約充足率、根拠品質、確率校正の不足が確認された場合
-だけ、同じ評価集合で `medium` と比較する。`high` 以上を既定にしない。
-[OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+`POLYMARKET_AI_REASONING_EFFORT` は設定とimmutableなprovider requestへ値を保持する。
+fake providerの挙動を変えない。null、未知値、大文字表記、前後空白付き表記を拒否する。
 
-完了契約の現行 `model_info` は固定8キーでreasoning effortを保存できない。再現条件を
-結果へ残すため、外部AI実装前に完了契約を別レビューで改訂し、`seed` の直後へ
-`reasoning_effort` を追加する。planned 2.0は未実装なので、同じ2.0設計を実装前に
-訂正し、未知キー禁止・固定キー順・completed/error双方のtestを更新する。それまでは
-本仕様を実装しない。実行ログにも設定値とproviderが返す有効値を記録する。
+### 4.2 Phase 2・3設定
+
+Phase 2ではBrave Searchとsafe URL fetcherに必要な検索・取得・log・lock・retry設定を、
+個別設計承認後に追加する。Phase 3では `openai` provider、APIキー、モデル、Structured
+Outputs、AI timeout・token・費用設定を追加する。Phase 3でOpenAIを使う場合だけ
+`OPENAI_API_KEY` を必須とし、モデル名、利用可能性、reasoning effort対応、料金、API
+schemaは実装時点の公式情報で再確認する。fake providerはテスト用途として維持できる。
+
+Phase 2・3で想定する正式名は既存表の名前を維持する。市場数は全Phaseで
+`POLYMARKET_MAX_MARKETS_PER_RUN` に統一し、別名を設けない。provider料金は変更される
+ため、費用上限だけに安全性を依存せず、検索回数・取得数・token数・retry数にも
+hard maxを設ける。
+
+| 環境変数 | 導入Phase / 制約 |
+| --- | --- |
+| `POLYMARKET_SEARCH_PROVIDER` | Phase 2。初期許可値 `brave` |
+| `POLYMARKET_BRAVE_SEARCH_API_KEY` | Phase 2でBrave利用時必須、空白不可 |
+| `POLYMARKET_AI_PROVIDER` | Phase 1は `fake` のみ。Phase 3で `openai` を追加 |
+| `OPENAI_API_KEY` | Phase 3でOpenAI利用時必須、空白不可 |
+| `POLYMARKET_AI_MODEL` | Phase 3。実装時点の公式仕様に基づく許可リスト方式 |
+| `POLYMARKET_AI_MODEL_VERSION` | Phase 3。任意の期待version |
+| `POLYMARKET_AI_REASONING_EFFORT` | 全Phase。既定 `low`、`low` / `medium` / `high` |
+| `POLYMARKET_AI_TEMPERATURE` | Phase 3。既定 `0`、0以上2以下の有限Decimal |
+| `POLYMARKET_AI_SEED` | Phase 3。既定未指定、対応時のみ64-bit整数 |
+| `POLYMARKET_PROMPT_VERSION` | Phase 3。必須、初期 `1.0`、`MAJOR.MINOR` |
+| `POLYMARKET_SEARCH_TIMEOUT_SECONDS` | Phase 2。既定15、1以上60以下 |
+| `POLYMARKET_FETCH_TIMEOUT_SECONDS` | Phase 2。既定15、1以上60以下 |
+| `POLYMARKET_AI_TIMEOUT_SECONDS` | Phase 3。既定90、10以上300以下 |
+| `POLYMARKET_RUN_TIMEOUT_SECONDS` | Phase 2。既定1200、60以上3600以下 |
+| `POLYMARKET_MAX_MARKETS_PER_RUN` | 全Phase。既定1、1以上10以下、hard max 10 |
+| `POLYMARKET_MAX_SEARCH_QUERIES_PER_MARKET` | Phase 2。既定4、1以上6以下 |
+| `POLYMARKET_MAX_RESULTS_PER_QUERY` | Phase 2。既定5、1以上10以下 |
+| `POLYMARKET_MAX_FETCHES_PER_MARKET` | Phase 2。既定8、2以上12以下 |
+| `POLYMARKET_MAX_RESPONSE_BYTES` | Phase 2。既定2097152、65536以上4194304以下 |
+| `POLYMARKET_MAX_SOURCE_CHARS` | Phase 2。既定12000、1000以上20000以下 |
+| `POLYMARKET_MAX_TOTAL_SOURCE_CHARS` | Phase 2。既定60000、2000以上80000以下 |
+| `POLYMARKET_MAX_AI_INPUT_TOKENS` | Phase 3。既定32000、4096以上64000以下 |
+| `POLYMARKET_MAX_AI_OUTPUT_TOKENS` | Phase 3。既定4096、512以上8192以下 |
+| `POLYMARKET_MAX_RETRIES` | Phase 2。既定1、0以上2以下。初回を含め最大2回 |
+| `POLYMARKET_RETRY_BASE_SECONDS` | Phase 2。既定1、0.1以上10以下 |
+| `POLYMARKET_MAX_RUN_COST_USD` | Phase 3。既定2.00、正の有限Decimal |
+| `POLYMARKET_AI_DRY_RUN` | 全Phase。Phase 1既定 `true`。Phase 3の実行要件充足時だけ `false` を許可 |
+
+### 4.3 Phase 1 CLI終了コード
+
+```text
+0: dry-run正常終了
+1: 設定不正
+2: 入力または結果契約不正
+3: 非dry-run要求または未実装provider等の段階未到達
+```
+
+CLIはstderrへ簡潔な日本語エラーを出し、通常利用時にtracebackを表示しない。
+内部では設定不正、契約不正、段階未到達を別の例外型にし、終了コードへ一意に
+変換できるようにする。
+
+完了契約の `model_info` は本改訂で固定9キーとなり、`reasoning_effort` を
+`prompt_version` の直後に保持する。completed/error双方で同じ契約を使う。この設計改訂
+の承認によりPhase 1の開始ゲートだけを解除できる。Phase 1は正式結果を生成・更新しない
+ため、9キーmodel_infoの実装はPhase 3まで行わない。
 
 ## 5. 入力ファイルと処理対象
 
+### 5.1 Phase 1の厳格な読込
+
 1. ファイル名昇順で最後の `data/analysis_input_*.json` を選ぶ。
-2. 同じ日時suffixの `data/analysis_result_*.json` を唯一の対応結果とする。
+2. 同じ日時suffixの `data/analysis_result_*.json` を唯一の対応結果とし、欠落を拒否する。
 3. 入力と結果の件数、順序、`market_id`、`analysis_reference_time` を検証する。
    analysis input各要素は2.3節の14キーを必須とし、`市場説明` の非空を検証する。
-4. 空でない結果の全要素は同じ既知 `schema_version` でなければならない。
-5. `1.0` は完了契約4.3の全件移行を原子的に完了してから外部通信を始める。
-   1.0/2.0混在や処理中の暗黙移行は禁止する。
-6. 0件は `[]\n` のまま正常終了し、外部通信しない。
+4. 結果は固定4キー順の2.0 pendingだけを受理する。`1.0`、completed、error、
+   状態・version混在、未知・不足キー、キー順不正、型不正を拒否する。
+5. 入力・結果ともUTF-8 BOM、全階層の重複キー、非有限number、不正JSONを拒否する。
+6. 不正な最新入力・結果から古いファイルへfallbackしない。
+7. 0件は入力・結果とも `[]\n` のまま正常終了し、外部通信しない。
+
+Phase 1は入力、結果、markets CSV、candidates CSV、その他dataファイルを変更しない。
+一時ファイル、ログ、lockも作らない。実行前後でdata directory内の全既存ファイルの
+SHA-256が一致しなければならない。
 
 機能上限は入力順で最大10市場だが、既定では1市場だけを逐次処理する。
-`pending` だけが既定対象。
-`completed` と `error` はバイト上の値を保持し、再分析・自動再試行しない。
-対象market IDを明示するオプションは `pending` の部分実行と、別処理で既に
-`pending` へ戻された `retryable: true` の再試行だけに使用する。
-`retryable: false` のリセット機能は初期版に含めない。
+Phase 1では全件がpendingであることを検証した後、その入力順先頭から設定件数までを
+今回の計画対象にする。市場IDで再ソートせず、ランダム抽出しない。pending 0件は正常、
+設定上限より少ない場合は全件を選ぶ。
 
-市場単位処理中の結果はメモリだけで保持し、全件処理・全体検証後に一度だけ
-正式結果を置換する。途中停止では実行前ファイルを維持する。
+### 5.2 Phase 3の状態処理
 
-実APIの段階的な通し試験は1市場、3市場、最大10市場の順とする。1市場で入力・
+Phase 3ではpendingだけを既定対象とし、既存completedとerrorをバイト上の値として
+保持して再分析・自動再試行しない。対象market ID明示や状態リセットは完了契約と
+log・lock・retry設計に従う。市場単位処理中の結果はメモリだけで保持し、全件処理・
+全体検証後に一度だけ正式結果を置換する。途中停止では実行前ファイルを維持する。
+
+Phase 3の実API通し試験は1市場、3市場、最大10市場の順とする。1市場で入力・
 resolution解釈・source採否・費用・正式結果を利用者がレビューし、3市場で異なる
 カテゴリと言語を評価した後だけ、利用者が設定を10まで明示的に上げる。コードが
 自動的に上限を拡大しない。
 
 ## 6. 検索クエリ生成契約
+
+6～23節はPhase 2・3で個別ゲート承認後に実装する契約である。Phase 1はこれらの
+query生成、検索、URL取得、情報源評価、AI推論、正式結果構築、error変換、retry、
+JSONLログ、lock、課金処理を実装・実行しない。
 
 初期版はAIにクエリを自由生成させず、2.3節の入力14キーとコード定数
 `QUERY_TEMPLATE_VERSION = "1.0"` から次の固定順で最大4件を作る。
@@ -491,8 +560,8 @@ AI候補が意味検証に合格した後、コードが完了契約どおりsou
 `S1`から採番する。candidate参照をsource参照へ一意に変換し、Decimal、
 `ROUND_HALF_UP`、最大4桁でNO確率・市場価格・差・結論を派生する。
 
-`model_info` は2.3節と4節の前提契約改訂後、実際のprovider/model/model version/
-prompt version/temperature/seed/reasoning effort/tools/search providerから構築する。
+`model_info` は完了契約10節の固定9キー順に、実際のprovider/model/model version/
+prompt version/reasoning effort/temperature/seed/tools/search providerから構築する。
 OpenAIが安定したmodel versionを返さない
 場合はnullとし、推測しない。`POLYMARKET_AI_MODEL_VERSION` はproviderが公開・返却
 するversionの期待値であり、request parameterや出力上書き値ではない。設定したのに
@@ -693,83 +762,128 @@ rate limit、推論基盤は変化する。同じreasoning effort、temperature 
 同一結果を保証しない。
 本文とモデル生出力を永続保存しないため、完全再現も保証しない。
 
-結果JSONのURL・日時・model info（前提改訂後のreasoning effortを含む）・prompt version・
+結果JSONのURL・日時・固定9キーmodel info・prompt version・
 参照関係と、ログのrun ID、query分類、
 回数、usage、状態・errorから条件を追跡する。query本文、検索結果全文、取得本文、
 AI生出力までは追跡できない。この境界を完全監査と誤認しない。
 
-## 24. 初期実装の最小範囲
+## 24. 段階別の最小範囲
 
-含める:
+### 24.1 Phase 1: 外部AI foundation
 
-- Brave Search API 1 provider、OpenAI Responses API 1 provider
-- 既定1モデル `gpt-5.6-terra`、reasoning effort `low`、strict Structured Outputs
-- 既定1市場・機能上限10市場の逐次処理、pendingだけ。実APIは1→3→10で拡大
-- 公開HTTP(S)、HTML/JSON/text、as-of時点検証
-- 決定的4 query、安全なURL取得、2～8source
-- 生本文・検索結果・AI生出力を永続保存しない
-- transport retry最大1回、モデル不正再要求最大1回
-- 市場単位7error、全体原子的結果保存、サニタイズJSONLログ、lock
-- dry-run、予算・timeout・件数上限、売買機能なし
+Phase 1で実装してよいもの:
 
-含めない:
+- `run_external_analysis.py` の新規CLI入口
+- immutableな設定dataclassと環境変数mapping注入
+- 4.1節の4設定と、既定1市場・hard max 10
+- 最新14キーanalysis inputと同suffixの全件2.0 pending結果の厳格照合
+- pending市場の入力順先頭N件選択
+- immutableな `AnalysisRequest` とprovider protocol
+- ネットワークを使わず固定内部応答だけを返すfake provider
+- 決定的なdry-run計画と4.3節の終了コード
+- data directory全ファイル不変の検証
 
-- 複数検索/AI providerの実装（interfaceのみ）、モデル自動fallback
-- モデル内蔵Web検索、AI query生成、並列処理、scheduler、GUI、cloud
-- PDF/XML/RSS、画像・動画・音声、JS rendering、browser、Cookie/login/paywall/CAPTCHA
-- source本文・model生出力の証跡保存、current緩和モード
-- completed再分析、`retryable: false` reset、自動error再処理
+`AnalysisRequest` は入力14キーを次の固定対応で保持する。
+
+```text
+market_id <- 市場ID
+question <- 市場
+description <- 市場説明
+resolution_source <- 解決情報源
+yes_price <- YES価格
+no_price <- NO価格
+volume <- 出来高
+liquidity <- 流動性
+deadline <- 締切日
+category <- カテゴリ
+days_until_deadline <- 締切までの日数
+market_url <- URL
+analysis_reference_time <- 分析基準日時
+selection_reason <- 選定理由
+reasoning_effort <- POLYMARKET_AI_REASONING_EFFORT
+```
+
+文字列は要約、翻訳、改行変更、空文字補完を行わず、JSON numberはfloatへ変換せず
+Decimalとして意味を維持する。requestへAPIキー、ファイルpath、環境情報を含めない。
+
+provider protocolはrequestを受ける境界だけを固定し、正式completed/error JSONの型を
+返さない。fake providerの最小内部応答は、例えばimmutableな
+`ProviderDryRunResult {market_id, accepted}` とし、固定値、入力順、時刻・乱数非依存、
+AI文章・確率なしとする。通常のdry-runはproviderを呼ばずrequest構築までで停止するが、
+fake provider自体は単体で境界試験できなければならない。
+
+dry-run stdoutは入力basename、結果basename、provider、reasoning effort、max markets、
+pending件数、選択件数、選択market IDだけを固定順・LF・末尾LFで表示する。市場説明、
+resolution source、request全文、APIキーを表示しない。同じ入力・設定では同じbytesとする。
+
+Phase 1で禁止するもの:
+
+- OpenAI・Brave Search・URL取得・DNS解決・SSRF処理
+- APIキー読込、completed/error生成、analysis result更新
+- lock、JSONLログ、retry、一時ファイル
 - 売買、wallet、注文、数量、収益計算、投資助言
+
+### 24.2 Phase 2: 検索・安全な取得基盤
+
+個別ゲート承認後、safe URL fetcher、SSRF防御、Brave Search候補取得、本文取得、
+source候補検証、log・lock・retry基盤を実装する。OpenAI通信、Structured Outputs、
+completed/error生成、正式結果更新はまだ行わない。
+
+### 24.3 Phase 3: AI分析と正式状態遷移
+
+個別ゲート承認後、OpenAI provider、Structured Outputs、AI生出力検証、コードによる
+completed/error構築、全体原子的結果保存を実装する。実APIは明示承認後に1市場から
+開始し、レビュー後だけ3市場、最大10市場へ拡大する。
+
+全Phaseで、モデル内蔵Web検索、AI query生成、並列処理、scheduler、GUI、cloud、
+PDF/XML/RSS、画像・動画・音声、JS rendering、browser、Cookie/login/paywall/CAPTCHA、
+completed再分析、自動error再処理、売買・wallet・注文を対象外とする。
 
 ## 25. 実装分割案
 
-本仕様単独の承認後も外部AI実装へ進まない。最初に前提工程を別作業として行う。
+解決条件伝播、14キーanalysis input、2.0 pending移行、完了契約の固定9キー
+`model_info`設計が完了したため、Phase 1だけを次の実装単位として開始できる。
 
-1. Gamma `description` / `resolutionSource` 伝播の別設計とレビュー
-2. 収集→候補→14キーanalysis inputまでをテスト先行実装し、実データ検証
-3. 完了契約 `model_info.reasoning_effort` の別設計改訂とレビュー
-4. 設定schema、secret redaction、SearchProvider/AIProvider interface
-5. 入力・結果2.0移行/照合、対象選択、dry-run
-6. 決定的query生成とBrave結果normalizer
-7. SSRF・robots・size制限付きHTTP取得器
-8. HTML/JSON/text抽出、時点・source検証、安定ID
-9. AI入力builderとprompt injection境界
-10. OpenAI Structured Outputs adapterと生出力validator
-11. completed派生値・7error変換、状態遷移
-12. JSONL log、cost/retry、lock
-13. 全体orchestrator、原子的保存、停止回復
-14. mock統合試験、明示承認後だけ1市場の実API smoke test
-15. レビュー済み品質基準に従って3市場、最大10市場へ段階拡大
+1. Phase 1設定dataclass、厳格なmapping読込、CLI例外・終了コード
+2. 14キー入力と全件2.0 pending結果の厳格照合
+3. AnalysisRequest、provider protocol、fake provider
+4. 入力順先頭N件選択、決定的dry-run stdout、data不変検証
+5. Phase 1の全unit/integration test、README、plan、隔離実データdry-run
+6. Phase 2のsafe URL fetcher・SSRF・Brave・source候補契約を別レビュー
+7. Phase 2の検索・取得・log・lock・retry基盤をテスト先行実装
+8. Phase 3の最新OpenAI API・model・Structured Outputs schemaを別レビュー
+9. Phase 3のprovider、生出力validator、completed/error構築、原子的保存を実装
+10. mock統合試験後、明示承認を得て1市場、3市場、最大10市場へ段階拡大
 
-1～2の前提工程では既存4 scriptの契約変更を明示し、必要なfixtureと文書を同時更新
-する。4以降の外部AI工程は、承認済み14キー入力契約を再変更しない。全commitで依存
-追加を最小化する。実API testは費用と外部状態を伴うため通常unit testから分離し、
-secretなしCIでは実行しない。
+Phase 1は承認済み14キー入力と2.0 pending契約を変更しない。Phase 2・3は個別ゲートを
+満たすまで実装しない。全commitで依存追加を最小化し、実API testは費用と外部状態を
+伴うため通常unit testから分離し、secretなしCIでは実行しない。
 
 ## 26. テスト観点
 
 ### 26.1 設定・秘密情報
 
-- provider別key未設定、空白、不正provider/model/model versionを全体失敗
-- reasoning effortの6許可値、既定 `low`、未知値、provider非対応
-- temperature/seed/timeout/件数/bytes/token/retry/予算の上下境界
-- dry-runで外部call・結果変更なし
-- API key、Authorization、Cookie、例外原文が結果・log・stdoutにない
-- `.env` 非追跡、`.env.example` に実値なし
+- Phase 1の全設定未指定で `fake`、`true`、1、`low`
+- `POLYMARKET_MAX_MARKETS_PER_RUN` の1・10を受理し、0、負数、11、空文字、
+  小数、指数、`+1`、`01`、前後空白を拒否
+- dry-runの厳密な `true` / `false` 解析と、`false` の終了コード3
+- fakeだけを受理し、openai、未知provider、大文字・空白補正を拒否
+- reasoning effortの `low` / `medium` / `high`、既定 `low`、未知値・null・補正拒否
+- mapping注入で検証し、`os.environ` とAPIキーを読まない
+- Phase 1で外部call、結果・data変更、temp、log、lockがない
 
 ### 26.2 入力・状態
 
 - 最新入力と同suffix結果を選び、件数・順序・ID・reference time一致
-- 1.0全件pendingから2.0全件pendingへ原子的移行
-- markets/candidatesの `市場説明`・`解決情報源` が値変更なく伝播する
-- `市場説明` のnull・欠落・空白だけを候補から除外し、候補0件を正常扱いする
-- `解決情報源` の欠落/nullを空文字に固定し、空文字を14キー入力で維持する
-- 旧12キーanalysis inputを外部通信前に拒否し、14キーだけを受理する
-- 1.0/2.0混在、未知version、壊れた既存結果を全体失敗
-- pendingだけ処理し、completed/error/未選択pendingをbyte相当で保持
-- 0件 `[]\n`、最大10件、逐次順、途中停止で既存結果不変
+- 結果欠落、1.0、completed、error、混在、未知versionをPhase 1で拒否
+- 4キー順、型、BOM、重複キー、不正JSONを厳格検証
+- 14キーからAnalysisRequestへ値変更なく対応し、説明改行・解決情報源空文字・Decimalを維持
+- pending 0件、1件、3件、11件と設定1・3・10の境界
+- 入力順を維持し、市場ID再ソート・ランダム抽出をしない
+- dry-run stdoutが同じ入力・設定でbyte単位一致し、ID以外の機微本文を表示しない
+- data directory全既存ファイルのSHA-256不変
 
-### 26.3 query・検索
+### 26.3 Phase 2 query・検索
 
 - 日本語/英語、NFKC、制御文字、長さ300、重複、固定4分類・固定順
 - 0件、重複URL、sponsored、短縮・userinfo・非HTTP URLを除外
@@ -777,7 +891,7 @@ secretなしCIでは実行しない。
 - snippetだけをsource/AI入力にしない
 - provider response field欠落・未知追加fieldをnormalizer境界で処理
 
-### 26.4 URL取得・SSRF・robots
+### 26.4 Phase 2 URL取得・SSRF・robots
 
 - localhost、単一label、IPv4/IPv6 private、link-local、metadata、mapped IPv4拒否
 - DNSがglobal/non-global混在、rebind、接続直前変化を拒否
@@ -788,7 +902,7 @@ secretなしCIでは実行しない。
 - robots allow/disallow、4xx unavailable、5xx/network unreachable、cache
 - paywall、login、CAPTCHA、JS必須、PDF/XML/RSSを不採用
 
-### 26.5 情報源
+### 26.5 Phase 2 情報源
 
 - primary `used` / `not_available` / `not_applicable` の各条件
 - secondary publisher重複、転載、canonical URL重複で最低数を満たさない
@@ -797,16 +911,16 @@ secretなしCIでは実行しない。
 - support/counter/both、未参照source、counter 0件の探索済み条件
 - 2/8件の境界、公式文書・IR・原論文・報道の分類
 
-### 26.6 AI入力・推論
+### 26.6 Phase 3 AI入力・推論
 
 - source順、candidate ID、固定field順、12k/60k文字、32k token境界
 - 長文の決定的切詰め、source多様性、HTML除去、時刻基準
 - 本文内prompt injectionを指示として実行しない
 - 入力外情報、秘密情報、source外URLをpromptへ混入しない
 - `store: false`、外部toolなし、model/temperature/seed記録
-- reasoning effort `low` をrequest・結果model info・logへ同じ値で記録
+- reasoning effortの要求値をrequest・結果の固定9キーmodel_info・logへ同じ値で記録
 
-### 26.7 AI出力
+### 26.7 Phase 3 AI出力
 
 - 正常strict JSONと `completed_candidate` / `insufficient_evidence`
 - code fence、前後文章、全階層重複key、未知key、必須不足、型違反
@@ -816,7 +930,7 @@ secretなしCIでは実行しない。
 - 1回目不正→再要求成功、2回目も不正→`invalid_model_output`
 - コードがNO確率、市場価格、gap、conclusion、正式IDを正しく派生
 
-### 26.8 エラー・retry・費用
+### 26.8 Phase 2・3 エラー・retry・費用
 
 - 7固定errorとcategory/retryable/failed stageの全許可組合せ
 - 検索0件と検索障害、取得不能とsource検証失敗を区別
@@ -826,7 +940,7 @@ secretなしCIでは実行しない。
 - 予算直前・一致・超過、usage欠落で新規call停止
 - 1市場errorでも残りを続行し、正常保存なら終了コード0
 
-### 26.9 ログ・lock・原子的保存
+### 26.9 Phase 2・3 ログ・lock・原子的保存
 
 - run ID形式・一意性、sequence、start/end、市場件数・retry・usage
 - 本文、snippet、生output、secret、絶対path、username非出力
@@ -840,7 +954,7 @@ secretなしCIでは実行しない。
 - 同じ確定分析データから正式JSONがbyte単位一致
 - UTF-8 BOMなし、LF、2-space、固定key/array順、末尾LF、空配列
 - Decimal最大4桁と負のzero正規化
-- 本設計変更時点は既存81テスト、4 script、README、plan、依存を不変に保つ
+- 本設計変更時点は既存109テスト、Python code、test、README、plan、依存を不変に保つ
 - 前提工程の将来実装では影響する3段CSV/JSON契約と全fixtureを明示更新する
 - mock外部providerでnetwork非依存unit/integration testを行う
 
@@ -850,8 +964,10 @@ secretなしCIでは実行しない。
 
 - completed 17キー、error 12キー、pending 4キーを変更していない
 - `SCHEMA_VERSION = "2.0"` と単一ファイル単一versionを維持した
-- 外部AI実装前に14キーanalysis inputと `model_info.reasoning_effort` の前提改訂が
-  必要であり、現行契約のまま実装しないことを明記した
+- 14キーanalysis inputと2.0 pending移行は完了済みである
+- 完了契約のmodel_infoを固定9キーへ改訂し、reasoning_effortをcompleted/error双方の
+  再現条件として固定した
+- Phase 1だけを外部通信なしで開始可能とし、Phase 2・3の個別ゲートを維持した
 - 7種類以外の市場errorを追加していない
 - snippetを正式sourceにせず、2～8件、primary・counter条件を維持した
 - YESだけをAI独立値とし、NO・市場価格・gap・conclusionはコード派生とした
@@ -863,6 +979,7 @@ secretなしCIでは実行しない。
 ### 27.2 安全性・実装量・費用のレビュー
 
 - 独立検索＋自前取得は本文検証に必要だが、SSRF/robots/抽出が最大の実装risk
+- Phase 1では検索・取得・DNS・APIキーを実装せず、このriskへ到達する経路を設けない
 - 初期content typeとsource種別を狭め、並列・PDF・browserを外した
 - 既定1市場、1→3→10の段階ゲート、4検索、1 retry、token・予算hard capで
   意図しない課金を制限した
@@ -889,17 +1006,42 @@ secretなしCIでは実行しない。
 - as-of時点完全性とprompt injection/SSRF対策がテスト可能
 - 初期provider/modelと差替えinterface、費用・利用条件の注意が明確
 - 完了契約との矛盾がなく、将来テスト観点と最小実装範囲が固定
-- 設計書1ファイルだけが変更され、既存81テストとPython構文確認が成功
+- 正本設計書2ファイルだけが変更され、既存109テストとPython構文確認が成功
 
-ただし「設計書完成」と「外部AI実装開始可能」は別である。次のゲートがすべて完了
-するまで外部AI工程はblockedとする。
+### 28.1 Phase 1開始ゲート
 
-1. Gammaの `description` / `resolutionSource` 伝播設計が承認済み
-2. markets CSV→candidates CSV→14キーanalysis inputの実装・全テスト・実データ検証済み
-3. 旧12キー成果物を暗黙使用せず、新パイプラインで再生成済み
-4. 完了契約の `model_info.reasoning_effort` 改訂が承認・実装済み
-5. 1市場実API試験の費用・secret・利用条件が利用者に明示承認済み
+次をすべて満たす場合だけPhase 1を開始できる。
+
+1. Gamma `description` / `resolutionSource` の14キーまでの伝播が実装・検証済み
+2. 旧12キー成果物を拒否し、2.0 pending移行が実装・検証済み
+3. 本設計と完了契約の固定9キーmodel_info改訂が承認・mainへ統合済み
+4. Phase 1が外部通信・APIキー・正式結果更新を行わないことを実装計画で維持
+
+1・2は完了済みであり、3の承認・統合により従来の一律停止ゲートをPhase 1に限って
+解除する。固定9キー
+model_infoのコード実装はcompleted/errorを生成するPhase 3で行う。
+
+### 28.2 Phase 2開始ゲート
+
+- safe URL fetcher設計が承認済み
+- SSRF防御契約が承認済み
+- Brave Search設定契約が承認済み
+- source record契約を完了契約と照合済み
+
+満たすまで検索、DNS、URL取得、Brave通信、log・lock・retryを実装しない。
+
+### 28.3 Phase 3開始ゲート
+
+- completed/errorの固定9キーmodel_info契約が承認済み
+- OpenAI Structured Outputs schemaが完成・承認済み
+- model・API仕様・料金・データ条件を実装時点の公式情報で再確認済み
+- logging / lock / retry設計が承認済み
+- APIキー管理方針を確認済み
+- 1市場実API試験の費用・secret・利用条件を利用者が明示承認済み
+
+満たすまでOpenAI通信、`POLYMARKET_AI_DRY_RUN=false` の実分析、
+completed/error生成、正式結果更新を実装しない。
 
 設計承認前に実装、依存追加、`.env.example`、`.gitignore`、README、plan、test、
-data、GitHub Actionsを変更しない。承認後も25節の分割順でテスト先行し、実APIを
+data、GitHub Actionsを変更しない。各Phase承認後も25節の分割順でテスト先行し、実APIを
 使う試験は費用・secret・利用条件の明示確認後に限定する。

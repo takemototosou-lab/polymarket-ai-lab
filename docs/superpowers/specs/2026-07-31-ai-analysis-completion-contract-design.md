@@ -21,12 +21,12 @@
 
 ## 2. 現状と責務境界
 
-現在の `SCHEMA_VERSION = "1.0"` は、各市場について次の4キーだけを
+現在の `SCHEMA_VERSION = "2.0"` は、各市場について次の4キーだけを
 出力し、状態は `pending` だけを生成する。
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "market_id": "12345",
   "analysis_reference_time": "2026-07-30T22:04:49.568055+09:00",
   "status": "pending"
@@ -464,10 +464,22 @@ URLへ到達した場合も重複とする。重複排除後に最低件数を�
 | 2 | `model` | string | 1文字以上200文字以下 |
 | 3 | `model_version` | string または null | 提供元が公開しない場合はnull |
 | 4 | `prompt_version` | string | `MAJOR.MINOR` 形式 |
-| 5 | `temperature` | number または null | 使用値。非対応・不明はnull |
-| 6 | `seed` | integer または null | 使用値。非対応・不明はnull |
-| 7 | `tools_used` | array of string | 実際に呼び出した固定列挙 |
-| 8 | `search_provider` | string または null | 外部検索を使わない場合はnull |
+| 5 | `reasoning_effort` | string | `low`、`medium`、`high` |
+| 6 | `temperature` | number または null | 使用値。非対応・不明はnull |
+| 7 | `seed` | integer または null | 使用値。非対応・不明はnull |
+| 8 | `tools_used` | array of string | 実際に呼び出した固定列挙 |
+| 9 | `search_provider` | string または null | 外部検索を使わない場合はnull |
+
+`model_info` は上記の固定9キーとする。`reasoning_effort` はcompletedと
+errorの双方で必須とし、null、未知値、大文字表記、前後空白付き表記を
+拒否する。外部AI foundationの既定値は `low` とし、fake providerでも
+要求設定をそのまま保持する。OpenAI provider実装時は実際に要求した値を
+request、結果JSON、実行ログで一致させ、モデルが対応する値は実装時点の
+公式仕様で再確認する。
+
+Phaseごとの設定読込、provider境界、実装ゲートは
+[`2026-07-31-external-ai-analysis-pipeline-design.md`](./2026-07-31-external-ai-analysis-pipeline-design.md)
+を正本とし、本仕様は正式結果JSONへ保存する値と順序だけを定める。
 
 `temperature` は有限な0以上2以下のJSON numberとし、確率と同じ固定
 数値表現を使用する。`seed` は符号付き64ビット整数の範囲とする。
@@ -592,7 +604,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
   場合は `pending` へ戻せる
   - 時間経過により新しい情報源が公開・取得可能になった
   - 検索範囲、検索プロバイダ、情報源取得方法を変更した
-  - provider、model、model_version、temperature、seedを変更した
+  - provider、model、model_version、reasoning_effort、temperature、seedを変更した
   - `prompt_version` を変更した
   - 利用者が新しい検証可能な根拠を追加した
 
@@ -723,7 +735,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - 情報源URL、正規化URL、タイトル、発行元、公開日時、取得日時、種別
 - 情報源と根拠・反対材料の参照関係
 - provider、model、model_version
-- prompt_version、temperature、seed
+- prompt_version、reasoning_effort、temperature、seed
 - 使用ツール、検索プロバイダ
 
 結果JSONには情報源本文、検索結果全文、モデル生出力、内部プロンプト
@@ -801,6 +813,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
     "model": "example-model",
     "model_version": null,
     "prompt_version": "1.0",
+    "reasoning_effort": "low",
     "temperature": 0,
     "seed": null,
     "tools_used": [
@@ -832,6 +845,7 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
     "model": "example-model",
     "model_version": null,
     "prompt_version": "1.0",
+    "reasoning_effort": "low",
     "temperature": 0,
     "seed": null,
     "tools_used": [
@@ -905,6 +919,9 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 ### 19.5 モデル情報とエラー
 
 - model_infoの必須キー、型、順序
+- model_infoが固定9キーで、completedとerrorの双方に同じ順序で存在すること
+- reasoning_effortの `low` / `medium` / `high` を受理し、null、未知値、
+  大文字表記、前後空白付き表記を拒否
 - temperature、seedの境界とnull
 - tools_usedの列挙、重複、固定順
 - web_searchとsearch_providerの整合
@@ -927,10 +944,10 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 
 ### 19.7 既存機能の回帰
 
-- 既存81テストが引き続き成功
+- 既存109テストが引き続き成功
 - `fetch_markets.py`、`select_candidates.py`、
   `prepare_analysis_input.py` の出力契約が不変
-- `1.0` の既存pending生成動作は、`2.0`実装を開始するコミットまで不変
+- `2.0` pendingの固定4キー生成と1.0全件移行契約が引き続き不変
 - README、`plan.md`、依存関係を設計段階で変更しない
 
 ## 20. 実装前に別途設計する事項
