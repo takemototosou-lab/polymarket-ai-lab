@@ -48,6 +48,8 @@ class MimeRejectedError(Phase2Error):
 
 
 def phase2_exit_code(error: Phase2Error) -> int:
+    if not isinstance(error, Phase2Error):
+        raise TypeError("error must be a Phase2Error")
     return error.exit_code
 
 

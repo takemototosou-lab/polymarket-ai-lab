@@ -48,6 +48,10 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(code, type(error).exit_code)
                 self.assertEqual(code, phase2_exit_code(error))
 
+    def test_rejects_non_phase2_error_in_exit_code_mapping(self):
+        with self.assertRaises(TypeError):
+            phase2_exit_code(Exception("outside Phase 2"))
+
     def test_dataclass_field_order_is_fixed(self):
         expected = {
             PolicyUrl: ("original", "request_url", "hostname", "port", "path_and_query"),
@@ -83,6 +87,7 @@ class ContractTests(unittest.TestCase):
         for contract, names in expected.items():
             with self.subTest(contract=contract.__name__):
                 self.assertEqual(names, tuple(field.name for field in fields(contract)))
+                self.assertTrue(contract.__dataclass_params__.frozen)
 
     def test_dataclasses_are_frozen(self):
         candidate = SourceCandidate(
