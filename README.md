@@ -198,6 +198,31 @@ JSONはUTF-8 BOMなし、2スペースインデント、LF改行、末尾LFで�
 
 入力の読み込みと検証、結果生成、JSON生成がすべて成功してから同一ディレクトリの一時ファイルへ保存し、最後に原子的に置換します。入力不正、書き込み失敗、置換失敗では既存の分析結果JSONを変更しません。元の分析入力JSONも変更しません。
 
+## 外部AI Phase 1 dry-run
+
+Phase 1は、外部AI工程へ進む前の設定・入力照合・provider境界だけを確認するdry-runです。
+
+```powershell
+python run_external_analysis.py
+```
+
+既定値はprovider `fake`、dry-run `true`、対象1市場、reasoning effort `low`です。機能上限は10市場で、入力順の先頭から選びます。設定できる環境変数は次の4件だけです。
+
+```text
+POLYMARKET_AI_PROVIDER=fake
+POLYMARKET_AI_DRY_RUN=true
+POLYMARKET_MAX_MARKETS_PER_RUN=1
+POLYMARKET_AI_REASONING_EFFORT=low
+```
+
+市場数は1～10の通常のASCII 10進整数だけを受理します。`POLYMARKET_AI_PROVIDER=openai`と`POLYMARKET_AI_DRY_RUN=false`はPhase 1では終了コード3で拒否します。その他の不正設定は1、入力または結果契約不正は2、正常dry-runは0です。
+
+入力は最新の`analysis_input_*.json`と同suffixの`analysis_result_*.json`です。結果は全件`SCHEMA_VERSION = "2.0"`かつ`pending`の固定4キーだけを受理し、入力との件数・順序・市場ID・分析基準日時を照合します。0件も正常です。出力にはbasename、設定、件数、市場IDだけを固定順で表示します。
+
+Phase 1はOpenAI、Brave Search、その他の外部providerや有料APIを呼びません。APIキーを読み取らず、存在確認もしません。ネットワーク通信、completed/error生成、analysis result更新、dataファイル作成・更新、一時ファイル、ログ、lock、retry、売買、wallet、注文を行いません。したがってPhase 1には料金発生経路がなく、契約、プラン、請求設定、支払い方法、自動継続課金も変更しません。trial、free credit、無料枠も使用しません。
+
+Phase 2・3は未実装です。将来、有料APIの実通信を追加する場合は、APIキーが存在するだけでは実行せず、利用者の明示承認を必須とします。dry-runの既定値は`true`のままとし、provider、対象市場数、最大request数、最大token数、最大予算を課金前に表示します。利用者が明示的に非dry-runへ変更し、最大予算が設定され、予算超過のおそれがない場合だけ実行候補にします。市場数、retry数、token上限、予算を自動的に増やさず、無料枠を前提にせず、契約・プラン・請求・支払い・自動継続課金を変更しません。
+
 ## 取得条件
 
 - Gamma API上で有効
@@ -244,7 +269,7 @@ CSVは取得時点のスナップショットです。過去の検証では、�
 python -m unittest discover -s tests -v
 ```
 
-単体テストは外部APIへ接続しません。収集機の再試行、絞り込み、価格対応、重複除外、11列CSV、metadata正規化、multiline、候補選別機の11列入力・14列出力、境界値、取得日時基準、URL正規化、分散選択、0件出力に加え、分析入力変換機の14列・14キー伝播、数値正規化と、分析結果契約機の14キー入力、全階層重複キー検出、ISO 8601受理形式、1.0から2.0への一括移行、混在・不正・状態境界の拒否、固定キー順、原子的保存、短い書き込みを含む既存出力保護、バイト単位の決定性を確認します。
+単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。全138テストが成功しています。
 
 ## 使用API
 
