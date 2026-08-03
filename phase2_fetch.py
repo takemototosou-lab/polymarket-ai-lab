@@ -173,25 +173,27 @@ class FakeHttpTransport:
         return response
 
 
-def _location_from(response: FakeHttpResponse) -> str:
-    locations = tuple(
-        value
-        for name, value in response.headers
-        if isinstance(name, str) and name.lower() == "location"
-    )
-    if not locations or any(not isinstance(value, str) or not value for value in locations):
+def _location_from(headers: tuple[tuple[str, str], ...]) -> str:
+    locations = _header_values(headers, "location")
+    if not locations or any(not value for value in locations):
         raise UrlSafetyError("redirect Location is missing")
     if len(set(locations)) != 1:
         raise UrlSafetyError("redirect Locations conflict")
     return locations[0]
 
 
-def _enforce_redirect_body_limit(response: FakeHttpResponse, limit: int) -> None:
+def _enforce_redirect_body_limit(
+    response: FakeHttpResponse,
+    limit: int,
+    declared_length: int | None,
+) -> None:
     total = 0
     for chunk in response.body_chunks:
         total += len(chunk)
         if total > limit:
             raise ResponseContractError("redirect body exceeds the byte limit")
+    if declared_length is not None and total != declared_length:
+        raise ResponseContractError("redirect Content-Length does not match the body")
 
 
 def follow_redirects(
@@ -229,10 +231,17 @@ def follow_redirects(
                 final_response=response,
             )
 
-        _enforce_redirect_body_limit(response, limits.max_response_bytes)
+        headers = _validate_header_pairs(response.headers, limits)
+        declared_length = _validate_framing(headers, limits)
+        _validate_content_encoding(headers)
+        _enforce_redirect_body_limit(
+            response,
+            limits.max_response_bytes,
+            declared_length,
+        )
         if len(redirect_chain) >= limits.max_redirects:
             raise UrlSafetyError("redirect limit exceeded")
-        location = _location_from(response)
+        location = _location_from(headers)
         next_url = parse_redirect_url(current_plan.url, location)
         if next_url.request_url in visited:
             raise UrlSafetyError("redirect loop detected")
@@ -412,13 +421,9 @@ def _decode_body(
     return decoded, charset
 
 
-def _retry_after_value(response: FakeHttpResponse) -> str | None:
-    values = tuple(
-        value
-        for name, value in response.headers
-        if isinstance(name, str) and name.lower() == "retry-after"
-    )
-    return values[0] if len(values) == 1 and isinstance(values[0], str) else None
+def _retry_after_value(headers: tuple[tuple[str, str], ...]) -> str | None:
+    values = _header_values(headers, "retry-after")
+    return values[0] if len(values) == 1 else None
 
 
 def validate_response(
@@ -429,13 +434,13 @@ def validate_response(
     """Validate one final fake response without returning partial results."""
 
     response = trace.final_response
+    headers = _validate_header_pairs(response.headers, limits)
+    declared_length = _validate_framing(headers, limits)
     if response.status_code in RETRYABLE_HTTP_STATUSES:
-        raise RetryableHttpStatus(response.status_code, _retry_after_value(response))
+        raise RetryableHttpStatus(response.status_code, _retry_after_value(headers))
     if response.status_code != 200:
         raise ResponseContractError("only status 200 is a body candidate")
 
-    headers = _validate_header_pairs(response.headers, limits)
-    declared_length = _validate_framing(headers, limits)
     _validate_content_encoding(headers)
     content_type, charset, declared_charset = _parse_content_type(headers)
     body = _read_body(response, limits, declared_length)

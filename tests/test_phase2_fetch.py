@@ -287,6 +287,33 @@ class RedirectTests(unittest.TestCase):
             tuple(item.addresses for item in trace.resolutions),
         )
 
+    def test_rejects_invalid_redirect_headers_or_framing(self):
+        invalid = (
+            response(
+                302,
+                headers=(("Location", "/next"), ("Bad Header", "value")),
+            ),
+            response(
+                302,
+                headers=(("Location", "/next"), ("Content-Length", "2")),
+                chunks=(b"x",),
+            ),
+            response(
+                302,
+                headers=(("Location", "/next"), ("Content-Encoding", "gzip")),
+            ),
+        )
+        for value in invalid:
+            with self.subTest(headers=value.headers), self.assertRaises(
+                (ResponseContractError, MimeRejectedError)
+            ):
+                follow_redirects(
+                    plan(),
+                    resolver("a.example"),
+                    FakeHttpTransport({"https://a.example/": (value,)}),
+                    FetchLimits(),
+                )
+
 
 class ResponseHeaderTests(unittest.TestCase):
     def test_accepts_headers_at_count_and_byte_boundaries(self):
@@ -365,6 +392,18 @@ class ResponseHeaderTests(unittest.TestCase):
                     FetchLimits(),
                     "2026-08-03T00:00:00Z",
                 )
+
+    def test_validates_retryable_response_headers_before_classification(self):
+        value = response(
+            503,
+            headers=(("Retry-After", "1"), ("Bad Header", "value")),
+        )
+        with self.assertRaises(ResponseContractError):
+            validate_response(
+                raw_trace(value),
+                FetchLimits(),
+                "2026-08-03T00:00:00Z",
+            )
 
 
 class ResponseBodyTests(unittest.TestCase):
