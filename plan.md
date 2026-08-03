@@ -157,6 +157,26 @@ multiline、旧形式拒否、伝播工程時点のpending 1.0維持は単体テ
 
 候補0件は正常系であり、条件緩和は行わない。2.0 pendingは4キーのままで、外部検索、AI推論、`completed`、`error`、売買は実装していない。
 
+## 外部AI Phase 1 foundation
+
+- [x] `run_external_analysis.py` dry-run CLIを追加
+- [x] frozenな設定dataclassとmapping注入を追加
+- [x] provider `fake`、dry-run `true`、対象1市場、reasoning effort `low`を既定化
+- [x] 市場数1～10、hard max 10、非canonical表記拒否
+- [x] 最新14キー入力と同suffixの全件2.0 pending結果を厳格照合
+- [x] 入力順先頭N件を選択し、15項目のfrozen `AnalysisRequest`へ変換
+- [x] provider protocolとネットワークを使わない固定fake providerを追加
+- [x] basename・設定・件数・市場IDだけの決定的dry-run stdoutを追加
+- [x] 終了コード0（正常）、1（設定不正）、2（契約不正）、3（段階未到達）を固定
+- [x] data全通常ファイルのSHA-256不変、一時ファイル・log・lockなしを検証
+- [x] APIキーを読み取らず、存在確認もしないことを監視mappingで検証
+- [x] socket・HTTP入口を呼ばず外部通信しないことを検証
+- [x] 既存109件を含む全138テスト成功
+
+Phase 1はOpenAI、Brave Search、その他の有料APIを呼ばず、trial、free credit、無料枠も利用しない。課金・契約・プラン・請求・支払い方法・自動継続課金を変更せず、料金発生経路を持たない。`POLYMARKET_AI_DRY_RUN=false`と`POLYMARKET_AI_PROVIDER=openai`は終了コード3で拒否する。completed/error、analysis result更新、売買も未実装である。
+
+Phase 2・3で有料APIを実装する場合は別設計レビューと利用者の明示承認を必須とする。APIキーの存在だけでは実行しない。dry-run既定値を`true`に維持し、provider、対象市場数、最大request数、最大token数、最大予算を課金前に表示する。最大予算未設定または超過可能性がある場合は拒否し、市場数、retry数、token上限、予算を自動増加させない。無料枠を前提とせず、契約・プラン・請求設定・支払い方法・自動継続課金を変更しない。
+
 ## 公共仕様との差異
 
 Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、2026-07-30時点の実APIはこの値をHTTP 422で拒否し、JSONフィールド名の`volumeNum`を受理した。実測結果を確認し、利用者承認のうえ`volumeNum`を採用した。
@@ -170,7 +190,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] 外部検索・AI分析パイプラインを設計
 - [x] 市場説明・解決情報源を11列→14列→14キーへ伝播
 - [x] `SCHEMA_VERSION = "2.0"`へpending結果を移行
-- [ ] 外部AI実装
+- [x] 外部AI Phase 1 foundation（通信なしdry-run）
+- [ ] Phase 2のsafe URL fetcher・SSRF・Brave設計レビュー
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
 - [ ] 決着後に精度と収益性を評価
