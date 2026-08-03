@@ -191,7 +191,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] 市場説明・解決情報源を11列→14列→14キーへ伝播
 - [x] `SCHEMA_VERSION = "2.0"`へpending結果を移行
 - [x] 外部AI Phase 1 foundation（通信なしdry-run）
-- [ ] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave設計レビュー（Draft作成、承認待ち）
+- [x] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave設計レビュー
+- [ ] Phase 2A完全オフライン基盤の3 PR実装計画（Draft作成、実装未着手・承認待ち）
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
 - [ ] 決着後に精度と収益性を評価
