@@ -100,6 +100,13 @@ Phase 1は `run_external_analysis.py` を新しい入口とし、既存
 許可されても、Phase 2・3のネットワーク、APIキー、状態遷移、結果更新が許可された
 ことにはならない。
 
+Phase 2の検索候補・URL取得・SSRF・retry・lock・log・課金安全ゲートの詳細正本は
+[`2026-08-03-external-analysis-phase2-search-fetch-design.md`](./2026-08-03-external-analysis-phase2-search-fetch-design.md)
+とする。本書のPhase 2に関する従来の概略値や許可範囲と矛盾する場合は、より狭く
+定義したPhase 2正本を優先し、推測で折衷せず実装を停止する。Phase 2正本の承認は
+完全オフラインのPhase 2A開始だけを許可し、Phase 2B・2Cの実通信はそれぞれ別の
+利用者明示承認を必要とする。
+
 ## 3. 外部サービスの採用方針
 
 ### 3.1 検索方式
@@ -1023,12 +1030,17 @@ model_infoのコード実装はcompleted/errorを生成するPhase 3で行う。
 
 ### 28.2 Phase 2開始ゲート
 
-- safe URL fetcher設計が承認済み
-- SSRF防御契約が承認済み
-- Brave Search設定契約が承認済み
-- source record契約を完了契約と照合済み
+- Phase 2正本
+  [`2026-08-03-external-analysis-phase2-search-fetch-design.md`](./2026-08-03-external-analysis-phase2-search-fetch-design.md)
+  が承認・mainへ統合済み
+- safe URL fetcher、SSRF防御、Brave安全ゲート、source candidate契約が完了契約と
+  照合済み
+- Phase 2Aはfake/mock以外のtransport・resolver・providerへ到達不能で、APIキーを
+  読まない実装計画が承認済み
 
-満たすまで検索、DNS、URL取得、Brave通信、log・lock・retryを実装しない。
+満たすまで検索、DNS、URL取得、Brave通信、log・lock・retryを実装しない。満たしても
+開始可能なのはPhase 2Aだけであり、Phase 2Bの手動URL取得とPhase 2CのBrave通信は、
+各正本ゲートを満たしたうえで利用者が対象・上限・費用を明示承認するまで拒否する。
 
 ### 28.3 Phase 3開始ゲート
 
