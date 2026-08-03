@@ -192,6 +192,23 @@ Phase 2・3で有料APIを実装する場合は別設計レビューと利用者
 
 PR 1はproduction CLIへ接続せず、外部通信、system DNS、URL取得、APIキー、課金経路を持たない。fake fetch、redirect追跡、response検証、retry、search、lock、logは未実装である。次はPR 1のレビュー・main統合後にPR 2を開始し、Phase 2B/2Cの実通信には進まない。
 
+## 外部分析 Phase 2A PR 2
+
+- [x] 固定GET・固定4 headerだけを記録する完全オフラインの`FakeHttpTransport`を追加
+- [x] redirect最大3回、loop拒否、各hopのURL・DNS・IP・peer IP再検証を追加
+- [x] response header件数・byte数・framing・body byte数のhard maxを追加
+- [x] HTTP 200だけを本文候補とし、429・502・503・504だけをretry候補に固定
+- [x] `identity`以外のContent-EncodingとHTML/XHTML以外のMIMEを拒否
+- [x] UTF-8 BOM・charset整合・strict decode・20,000文字上限を固定
+- [x] retry 0～2回、指数backoff、注入jitter、Retry-After 0～30秒、request hard maxを追加
+- [x] fake clock・fake sleepだけでretry時間を検証し、実sleepを不使用
+- [x] PR 2対象49件、既存178件を含む全227テスト成功
+- [x] Python 23ファイルの構文確認成功
+- [x] production moduleのsocket・HTTP client・Brave・OpenAI import 0件を確認
+- [x] PR 1・Phase 1・data・requirements・正本設計書が不変であることを確認
+
+PR 2もproduction CLIへ接続せず、fake mappingと注入関数だけで動く。外部通信、system DNS、URL実取得、APIキー参照、Brave、OpenAI、検索、lock、log、課金経路を持たない。Phase 2A PR 3、Phase 2B、Phase 2Cは未実装である。
+
 ## 公共仕様との差異
 
 Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、2026-07-30時点の実APIはこの値をHTTP 422で拒否し、JSONフィールド名の`volumeNum`を受理した。実測結果を確認し、利用者承認のうえ`volumeNum`を採用した。
@@ -208,8 +225,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] 外部AI Phase 1 foundation（通信なしdry-run）
 - [x] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave設計レビュー
 - [x] Phase 2A完全オフライン基盤の3 PR実装計画
-- [ ] Phase 2A PR 1（内部契約・URL・IDNA・IP・fake DNS、Draftレビュー待ち）
-- [ ] Phase 2A PR 2（fake fetch・redirect・response・retry、PR 1統合後）
+- [x] Phase 2A PR 1（内部契約・URL・IDNA・IP・fake DNS）
+- [x] Phase 2A PR 2（fake fetch・redirect・response・retry、Draftレビュー待ち）
 - [ ] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、PR 2統合後）
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
