@@ -209,6 +209,22 @@ PR 1はproduction CLIへ接続せず、外部通信、system DNS、URL取得、A
 
 PR 2もproduction CLIへ接続せず、fake mappingと注入関数だけで動く。外部通信、system DNS、URL実取得、APIキー参照、Brave、OpenAI、検索、lock、log、課金経路を持たない。Phase 2A PR 3、Phase 2B、Phase 2Cは未実装である。
 
+## 外部分析 Phase 2A PR 3
+
+- [x] fake検索fixtureのコピー・候補検証・rank順・固定source ID
+- [x] query最大500文字・前後空白拒否
+- [x] LocalFileStoreと注入fakeによる排他lock、所有者照合、失敗時close、stale非回復
+- [x] 固定21キーJSONL、固定status/errorとevent policy、Decimal、byte上限
+- [x] short write・flush/fsync失敗のsticky停止と、成功後log失敗時の再call禁止
+- [x] テスト内だけでsearch/DNS/redirect/fetch/lock/logを合成
+- [x] peer IP拒否時も予約・拒否eventを残す試験
+- [x] 同一fake入力・時計で候補、取得metadata、JSONL bytes一致
+- [x] 全258テスト、Python 30ファイル構文、diff check（最終検証参照）
+- [x] Phase 1・PR 1/2・実データ・依存関係・正本設計書は未変更
+- [x] 評価指標だけの参考メモを`docs/research/analysis-feature-roadmap.md`へ保存
+
+Phase 2A PR 3はDraftレビュー待ち。production CLIは未接続。外部通信・APIキー参照・料金発生経路・契約変更なし。lock/logはテスト一時領域のみ。Phase 2B/2CとPhase 3は未着手で、それぞれの承認を先取りしない。log失敗時の部分行、所有確認不能・crash時の残存lockは自動回復しない。
+
 ## 公共仕様との差異
 
 Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、2026-07-30時点の実APIはこの値をHTTP 422で拒否し、JSONフィールド名の`volumeNum`を受理した。実測結果を確認し、利用者承認のうえ`volumeNum`を採用した。
@@ -226,8 +242,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave設計レビュー
 - [x] Phase 2A完全オフライン基盤の3 PR実装計画
 - [x] Phase 2A PR 1（内部契約・URL・IDNA・IP・fake DNS）
-- [x] Phase 2A PR 2（fake fetch・redirect・response・retry、Draftレビュー待ち）
-- [ ] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、PR 2統合後）
+- [x] Phase 2A PR 2（fake fetch・redirect・response・retry、統合済み）
+- [x] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、Draftレビュー待ち）
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
 - [ ] 決着後に精度と収益性を評価
