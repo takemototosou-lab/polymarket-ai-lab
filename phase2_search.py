@@ -65,7 +65,7 @@ def make_candidate(request, candidate, candidate_index):
 
 
 class FakeSearchProvider:
-    """Copied fixtures only; rank ties preserve fixture order; indices start at one."""
+    """Copied fixtures; one-based registration indices precede stable rank sorting."""
 
     def __init__(self, records):
         copied = {}
@@ -76,8 +76,8 @@ class FakeSearchProvider:
                 raise ResponseContractError("Duplicate candidate ID")
             if any(c.query_kind != request.query_kind for c in candidates):
                 raise ResponseContractError("Candidate query kind mismatch")
-            ordered = sorted(candidates, key=lambda c: c.rank)[:request.max_results]
-            copied[request] = tuple(make_candidate(request, c, i) for i, c in enumerate(ordered, 1))
+            identified = tuple(make_candidate(request, c, i) for i, c in enumerate(candidates, 1))
+            copied[request] = tuple(sorted(identified, key=lambda c: c.rank)[:request.max_results])
         self._records = MappingProxyType(copied)
 
     def search(self, request):

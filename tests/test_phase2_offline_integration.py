@@ -72,7 +72,7 @@ def offline_run(directory):
             def reserve():
                 writer.ensure_ready()
                 counter.reserve()
-                emit(event_type='request_reserved',status='reserved',attempt=1)
+                emit(event_type='request_reserved',status='started',attempt=1)
             class AuditedTransport:
                 def get(self, connection_plan, **kw):
                     reserve()  # Every redirect hop consumes a request before get.
@@ -123,7 +123,7 @@ class OfflineIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryFile() as handle:
             writer = Phase2JsonlWriter(handle)
             writer.append(event())
-            writer.append(event(sequence=1,event_type='request_reserved',status='reserved',attempt=1,request_count=1))
+            writer.append(event(sequence=1,event_type='request_reserved',status='started',attempt=1,request_count=1))
             url = parse_policy_url(provider.search(request)[0].url)
             with self.assertRaises(UrlSafetyError):
                 try:
@@ -169,10 +169,10 @@ class OfflineIntegrationTests(unittest.TestCase):
                 def operation():
                     writer.ensure_ready()
                     attempt = counter.used
-                    emit(event_type='request_reserved',status='reserved',attempt=attempt,request_count=attempt,retry_count=attempt-1)
+                    emit(event_type='request_reserved',status='started',attempt=attempt,request_count=attempt,retry_count=attempt-1)
                     if attempt == 1:
                         emit(event_type='fetch_finished',status='failed',error_code='dependency',attempt=attempt,request_count=attempt,retry_count=0,request_limit=None,cost_limit_usd=None)
-                        emit(event_type='retry_scheduled',status='scheduled',error_code='dependency',attempt=attempt,request_count=attempt,retry_count=1,duration_ms=500,request_limit=None,cost_limit_usd=None)
+                        emit(event_type='retry_scheduled',status='retry_scheduled',error_code='dependency',attempt=attempt,request_count=attempt,retry_count=1,duration_ms=500,request_limit=None,cost_limit_usd=None)
                         raise FakeConnectTimeout('fixture')
                     return 'ok'
                 self.assertEqual('ok', run_with_retry(operation,RetryPolicy(),clock,lambda upper:Decimal('0.5'),counter))

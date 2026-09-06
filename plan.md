@@ -219,7 +219,9 @@ PR 2もproduction CLIへ接続せず、fake mappingと注入関数だけで動�
 - [x] テスト内だけでsearch/DNS/redirect/fetch/lock/logを合成
 - [x] peer IP拒否時も予約・拒否eventを残す試験
 - [x] 同一fake入力・時計で候補、取得metadata、JSONL bytes一致
-- [x] 全258テスト、Python 30ファイル構文、diff check（最終検証参照）
+- [x] PR #9指摘修正：candidate_indexをfixture登録順に固定してからrank sort・件数制限
+- [x] PR #9指摘修正：statusをstarted/succeeded/failed/retry_scheduledへ限定しevent policyとerror_code必須・禁止を検証
+- [x] 全264テスト、Python 30ファイル構文、diff check（最終検証参照）
 - [x] Phase 1・PR 1/2・実データ・依存関係・正本設計書は未変更
 - [x] 評価指標だけの参考メモを`docs/research/analysis-feature-roadmap.md`へ保存
 

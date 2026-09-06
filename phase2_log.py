@@ -49,10 +49,10 @@ ERROR_CODES = frozenset(('url_safety', 'lock_conflict', 'dependency', 'response_
 # Each entry: allowed statuses, required non-null fields, optional fields.
 EVENT_POLICY = MappingProxyType({
     'run_started': (frozenset(('started',)), frozenset(('provider','request_limit','cost_limit_usd','request_count','retry_count')), frozenset()),
-    'request_reserved': (frozenset(('reserved',)), frozenset(('provider','attempt','request_limit','request_count','retry_count')), frozenset(('market_id','query_kind','cost_limit_usd'))),
+    'request_reserved': (frozenset(('started',)), frozenset(('provider','attempt','request_limit','request_count','retry_count')), frozenset(('market_id','query_kind','cost_limit_usd'))),
     'search_finished': (frozenset(('succeeded','failed')), frozenset(('provider','attempt','request_count','retry_count')), frozenset(('market_id','query_kind','selected_count','duration_ms','error_code','http_status'))),
     'fetch_finished': (frozenset(('succeeded','failed')), frozenset(('provider','attempt','request_count','retry_count')), frozenset(('market_id','query_kind','response_byte_count','fetched_count','duration_ms','error_code','http_status'))),
-    'retry_scheduled': (frozenset(('scheduled',)), frozenset(('provider','attempt','request_count','retry_count','error_code','duration_ms')), frozenset(('market_id','query_kind','http_status'))),
+    'retry_scheduled': (frozenset(('retry_scheduled',)), frozenset(('provider','attempt','request_count','retry_count','error_code','duration_ms')), frozenset(('market_id','query_kind','http_status'))),
     'run_finished': (frozenset(('succeeded','failed')), frozenset(('request_count','retry_count')), frozenset(('provider','selected_count','fetched_count','duration_ms','error_code'))),
     'log_error': (frozenset(('failed',)), frozenset(('error_code',)), frozenset(('request_count','retry_count'))),
 })
@@ -117,7 +117,7 @@ def serialize_event(event):
         _invalid()
     if any(value is not None for key, value in values.items() if key not in _COMMON | required | optional):
         _invalid()
-    if (event.status == 'failed') != (event.error_code is not None) and event.event_type != 'retry_scheduled':
+    if (event.status in ('failed', 'retry_scheduled')) != (event.error_code is not None):
         _invalid()
     if event.event_type == 'log_error' and event.error_code != 'response_contract':
         _invalid()

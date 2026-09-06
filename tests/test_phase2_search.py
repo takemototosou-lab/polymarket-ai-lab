@@ -43,7 +43,7 @@ class SearchTests(unittest.TestCase):
         values.clear()
         mapping.clear()
         result = provider.search(request(max_results=1))
-        self.assertEqual(['Q0-R1-C1'], [x.source_id for x in result])
+        self.assertEqual(['Q0-R1-C2'], [x.source_id for x in result])
         result.clear()
         self.assertEqual(1, len(provider.search(request(max_results=1))))
 
@@ -56,3 +56,31 @@ class SearchTests(unittest.TestCase):
     def test_kind_mismatch_rejected(self):
         with self.assertRaises(ResponseContractError):
             FakeSearchProvider({request():[candidate(query_kind=QueryKind.COUNTER)]})
+
+    def test_registration_index_survives_rank_sort(self):
+        provider = FakeSearchProvider({request():[
+            candidate(source_id='A', rank=3), candidate(source_id='B', rank=1),
+        ]})
+        self.assertEqual(['Q0-R1-C2', 'Q0-R3-C1'], [c.source_id for c in provider.search(request())])
+
+    def test_equal_ranks_preserve_registration_order(self):
+        provider = FakeSearchProvider({request():[
+            candidate(source_id='A', rank=2, title='first'),
+            candidate(source_id='B', rank=2, title='second'),
+        ]})
+        self.assertEqual([('Q0-R2-C1','first'), ('Q0-R2-C2','second')],
+                         [(c.source_id,c.title) for c in provider.search(request())])
+
+    def test_limit_does_not_renumber_registration_index(self):
+        req = request(max_results=1)
+        provider = FakeSearchProvider({req:[
+            candidate(source_id='A', rank=3), candidate(source_id='B', rank=1),
+        ]})
+        self.assertEqual(['Q0-R1-C2'], [c.source_id for c in provider.search(req)])
+
+    def test_same_fixture_recreates_same_registration_ids(self):
+        fixture = {request():[candidate(source_id='A', rank=3), candidate(source_id='B', rank=1)]}
+        provider = FakeSearchProvider(fixture)
+        expected = ['Q0-R1-C2', 'Q0-R3-C1']
+        for current in (provider, provider, FakeSearchProvider(fixture)):
+            self.assertEqual(expected, [c.source_id for c in current.search(request())])

@@ -23,6 +23,38 @@ class ShortWriter(MemoryHandle):
 
 
 class LogTests(unittest.TestCase):
+    def test_event_status_mapping_is_exactly_four_values(self):
+        cases = (
+            (event(), ('started',)),
+            (event(event_type='request_reserved', attempt=1), ('started',)),
+            (event(event_type='search_finished', attempt=1, request_limit=None, cost_limit_usd=None, selected_count=1), ('succeeded','failed')),
+            (event(event_type='fetch_finished', attempt=1, request_limit=None, cost_limit_usd=None, response_byte_count=20, fetched_count=1, http_status=200), ('succeeded','failed')),
+            (event(event_type='retry_scheduled', attempt=1, request_limit=None, cost_limit_usd=None, duration_ms=500), ('retry_scheduled',)),
+            (event(event_type='run_finished', request_limit=None, cost_limit_usd=None), ('succeeded','failed')),
+            (event(event_type='log_error', provider=None, request_limit=None, cost_limit_usd=None), ('failed',)),
+        )
+        for value, allowed in cases:
+            for status in ('started','succeeded','failed','retry_scheduled','reserved','scheduled'):
+                error = 'response_contract' if status in ('failed','retry_scheduled','scheduled') else None
+                current = replace(value, status=status, error_code=error)
+                with self.subTest(event_type=value.event_type, status=status):
+                    if status in allowed:
+                        self.assertEqual(status, json.loads(serialize_event(current))['status'])
+                    else:
+                        with self.assertRaises(ResponseContractError): serialize_event(current)
+
+    def test_status_error_presence_contract(self):
+        values = (
+            event(status='started', error_code='dependency'),
+            event(event_type='request_reserved', status='started', attempt=1, error_code='dependency'),
+            event(event_type='run_finished', status='succeeded', request_limit=None, cost_limit_usd=None, error_code='dependency'),
+            event(event_type='run_finished', status='failed', request_limit=None, cost_limit_usd=None, error_code=None),
+            event(event_type='retry_scheduled', status='retry_scheduled', attempt=1, request_limit=None, cost_limit_usd=None, duration_ms=500, error_code=None),
+        )
+        for value in values:
+            with self.subTest(status=value.status), self.assertRaises(ResponseContractError):
+                serialize_event(value)
+
     def test_fixed_keys_and_bytes(self):
         payload = serialize_event(event())
         self.assertEqual(LOG_KEYS, tuple(json.loads(payload)))

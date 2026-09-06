@@ -228,7 +228,7 @@ Phase 2Aは下記の内部fake基盤のみ実装しています。Phase 2B・2C�
 `phase2_*`はURL/IP検証、fake DNS/HTTP/search、redirect/response検証、fake retry、排他lock、JSONL logの内部部品です。組み合わせる処理はテスト内だけにあり、production CLIへ接続していません。URL実取得、system DNS、Brave、OpenAI、APIキー読込・存在確認、課金、売買、analysis result更新の経路はありません。lock/logの動作確認先は一時ディレクトリと注入fakeだけで、実データへ作成しません。
 
 - 検索queryは最大500 Unicode文字。前後空白、C0/C1、surrogateを拒否します。fixtureをコピーし、rank昇順・同rankは登録順、max_resultsまで返します。
-- 候補IDは`Q{request_ordinal}-R{rank}-C{candidate_index}`。indexはソート後の1始まりです。ordinalは呼び出し側が同一実行内で一意に割り当てます。fakeの登録集合は独立した試験シナリオも保持でき、実行全体の番号管理は行いません。
+- 候補IDは`Q{request_ordinal}-R{rank}-C{candidate_index}`。indexはfixture登録順の1始まりで、ID生成後にrankでstable sortし、max_resultsを適用します。同rankは登録順を維持し、絞り込み後もC番号を振り直しません。ordinalは呼び出し側が同一実行内で一意に割り当てます。fakeの登録集合は独立した試験シナリオも保持でき、実行全体の番号管理は行いません。
 - lockは`store=None`なら`LocalFileStore`を使用し、テストではfakeを注入します。排他新規作成・byte数確認・flush/fsyncを実施し、自分のrun IDとmetadataが一致するlockだけ解除します。破損・他所有者・stale lockを自動削除しません。協調する単一ホストの実行を前提とし、悪意ある同時ファイル置換を防ぐOS認可機構ではありません。所有inodeを確認できない失敗やcrashでは、lockを残してfail closedとします。
 - lock/log日時は秒精度のUTC `YYYY-MM-DDTHH:MM:SSZ`に固定し、暦日も検証します。run ID・market IDは呼び出し側が与える1～64文字のASCII英数字・`_`・`-`の識別子だけで、外部文字列や秘密情報を転用しません。
 - JSONLは固定21キー、UTF-8 BOMなし、末尾LF、Decimal固定小数・末尾ゼロ除去・負のゼロは0。1行8,192 bytes、1ファイル4 MiB。非負整数は最大`2**63-1`。`provider`は`fake`またはnull、`phase`は`2a`です。
@@ -239,14 +239,14 @@ JSONLの固定statusとevent policy（対象外フィールドはnull）:
 | event_type | status | 必須の追加値 |
 | --- | --- | --- |
 | run_started | started | provider、request_limit、cost_limit_usd、request_count、retry_count |
-| request_reserved | reserved | provider、attempt、request_limit、request_count、retry_count |
+| request_reserved | started | provider、attempt、request_limit、request_count、retry_count |
 | search_finished | succeeded / failed | provider、attempt、request_count、retry_count。成功時selected_count |
 | fetch_finished | succeeded / failed | provider、attempt、request_count、retry_count。成功時http_status=200、response_byte_count、fetched_count |
-| retry_scheduled | scheduled | provider、attempt、request_count、retry_count、error_code、duration_ms |
+| retry_scheduled | retry_scheduled | provider、attempt、request_count、retry_count、error_code、duration_ms |
 | run_finished | succeeded / failed | request_count、retry_count |
 | log_error | failed | error_code=response_contract |
 
-失敗statusはerror_code必須、成功statusはerror_code禁止です。retry_scheduledもerror_code必須です。コードは`url_safety`、`lock_conflict`、`dependency`、`response_contract`、`budget_limit`、`provider_auth`、`mime_rejected`だけ。任意値の許可範囲は`phase2_log.EVENT_POLICY`へ一元化しています。自由文、URL、query、本文、title、snippet、例外原文を受け取るフィールドはありません。`log_error`は有効なwriterに渡せる分類であり、失敗したwriterへの再書き込みはできません。
+statusは`started`、`succeeded`、`failed`、`retry_scheduled`の4値だけです。`failed`と`retry_scheduled`はerror_code必須、`started`と`succeeded`はerror_code禁止です。コードは`url_safety`、`lock_conflict`、`dependency`、`response_contract`、`budget_limit`、`provider_auth`、`mime_rejected`だけ。任意値の許可範囲は`phase2_log.EVENT_POLICY`へ一元化しています。自由文、URL、query、本文、title、snippet、例外原文を受け取るフィールドはありません。`log_error`は有効なwriterに渡せる分類であり、失敗したwriterへの再書き込みはできません。
 
 Phase 2Bの実URL取得、Phase 2CのBrave通信は、それぞれ別設計・実行直前の明示承認が必要です。この内部基盤の統合は実通信の承認にはなりません。
 
@@ -296,7 +296,7 @@ CSVは取得時点のスナップショットです。過去の検証では、�
 python -m unittest discover -s tests -v
 ```
 
-単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2Aの検証も含めて全258テストが成功しています。
+単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2Aの検証も含めて全264テストが成功しています。
 
 ## 使用API
 
