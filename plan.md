@@ -245,15 +245,25 @@ Phase 2A PR 3はmainへ統合済みで、Phase 2Aは正式完了した。product
 - [x] 12,000文字のsource extractionを将来工程として分離
 - [x] 独立experimental CLI候補と、通常テスト・CIでのreal network禁止を固定
 - [x] Phase 2B addendumを詳細正本として作成
+- [x] `dnspython>=2.8,<2.9`と`h11>=0.16,<0.17`のdirect dependency・version range候補を固定
+- [x] 両依存のlicense、Python 3.10～3.13、Windows 11互換性をレビュー
+- [x] DNS interface、socket/TLS/h11 interface、fake backend注入方法をレビュー
+- [x] h11投入前のraw response-head guardとduplicate Content-Length・CL+TE拒否契約を固定
+- [x] chunk extension・trailer全拒否とchunk-size line 128-byte上限を固定
+- [x] `SSLKEYLOGFILE`を参照しない明示SSLContext生成とprocess-isolated test契約を固定
+- [x] Phase 2B実装前のremaining security/interface issuesが0件であることを確認
 
-Phase 2BのPython実装はまだ開始しない。PR 1開始前に次の依存・interfaceレビューを別途行い、利用者の明示承認を得る。
+Phase 2BのPython実装はまだ開始しない。依存・security・interfaceレビューは完了したが、
+requirementsへのdirect dependency追加とPhase 2B PR 1実装は、次段階の利用者明示承認まで開始しない。
 
-- [ ] `dnspython`のdirect dependency採用可否とversion range
-- [ ] `h11`のdirect dependency採用可否とversion range
-- [ ] 両依存のlicense、Python 3.10～3.13、Windows 11互換性
-- [ ] OS設定resolverを利用するDNS backend interface
-- [ ] socket・TLS・h11間のinterfaceとtimeout・peer IP検証位置
-- [ ] fake DNS・socket・TLS・byte stream backendの注入方法
+- [x] `dnspython`のdirect dependency採用可否とversion range
+- [x] `h11`のdirect dependency採用可否とversion range
+- [x] 両依存のlicense、Python 3.10～3.13、Windows 11互換性
+- [x] OS設定resolverを利用するDNS backend interface
+- [x] socket・TLS・h11間のinterfaceとtimeout・peer IP検証位置
+- [x] fake DNS・socket・TLS・byte stream backendの注入方法
+- [ ] requirementsへ`dnspython`と`h11`をdirect dependencyとして追加
+- [ ] Phase 2B PR 1実装
 
 依存追加承認前はPhase 2B実装を開始しない。依存承認、実装承認、実通信smoke test承認は別ゲートとし、持ち越さない。実通信smoke testはPhase 2B全実装のレビュー・main統合後、利用者がその場で1 URLと上限を確認しexact `FETCH`を入力した別作業でのみ実行候補とする。Phase 2CとPhase 3は未着手である。
 
@@ -277,7 +287,8 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] Phase 2A PR 2（fake fetch・redirect・response・retry、統合済み）
 - [x] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、統合済み）
 - [x] Phase 2B実URL安全取得の詳細設計レビューとaddendum
-- [ ] Phase 2B依存・interfaceレビュー（依存追加前の開始ゲート）
+- [x] Phase 2B依存・security・interfaceレビュー（remaining issues 0件）
+- [ ] Phase 2B direct dependency追加（別承認ゲート）
 - [ ] Phase 2B実装（依存・interface承認前は開始禁止）
 - [ ] Phase 2C Brave候補検索（別設計・料金確認・明示承認前は開始禁止）
 - [ ] Phase 3 OpenAI分析（別設計・料金確認・明示承認前は開始禁止）
