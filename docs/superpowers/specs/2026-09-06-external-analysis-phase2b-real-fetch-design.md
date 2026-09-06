@@ -191,7 +191,7 @@ transportはA response順、次にAAAA response順で固定されたverified IP�
 1. socketを数値IPへ直接接続し、hostnameをOSで再解決しない
 2. 1 logical request reservationにつき先頭から最大4 IPまで接続を試せる
 3. TCP拒否・到達不能・connect timeoutだけはGET送信前に次IPへ進める
-4. 標準`ssl.create_default_context()`相当でTLS client contextを生成する
+4. 後述のPhase 2B専用契約でTLS client contextを明示生成する
 5. SNIと証明書hostname検証には元hostnameを使用する
 6. Host headerにも元hostnameを使用する
 7. TLS直後、GET送信前にpeer IPを取得してPhase 2A policyとpinned setで再検証する
@@ -200,6 +200,33 @@ transportはA response順、次にAAAA response順で固定されたverified IP�
 system・environment proxy、hostname再解決、TLS downgrade、HTTP fallback、`verify=False`、
 custom CA、client certificate、insecure modeを禁止する。TLS version、cipher、OS trust storeは
 Python/OpenSSLの安全な標準既定へ従い、弱い値へ上書きしない。
+
+Phase 2B production経路では、環境変数`SSLKEYLOGFILE`からTLS session keyの保存先を取り込む
+`ssl.create_default_context()`を使用しない。環境変数の一時削除、変更、復元による回避も、
+process global state、thread競合、復元失敗、他処理への副作用があるため禁止する。公開APIだけを使い、
+次の手順でcontextを生成する。
+
+```python
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.minimum_version = ssl.TLSVersion.TLSv1_2
+context.verify_flags |= (
+    ssl.VERIFY_X509_STRICT
+    | ssl.VERIFY_X509_PARTIAL_CHAIN
+)
+context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+```
+
+通信開始前に`verify_mode == ssl.CERT_REQUIRED`、`check_hostname is True`、minimum TLS versionが
+1.2以上、`keylog_filename is None`、security levelが2以上、system CAが読み込まれていることを
+fail closedで検証する。Windowsでは`load_default_certs(ssl.Purpose.SERVER_AUTH)`によって`CA`と
+`ROOT`のsystem storeを利用する。Python 3.10～3.12と3.13の既定差をなくすため、
+`VERIFY_X509_STRICT`、`VERIFY_X509_PARTIAL_CHAIN`、minimum TLS 1.2を全対応versionで明示する。
+暗号suite、TLS option、verify modeを弱める上書きを行わない。
+
+`SSLKEYLOGFILE`を読まない。`keylog_filename`を設定せず、`load_cert_chain()`とproduction経路の
+任意`load_verify_locations()`を呼ばない。custom CA、client certificate、weak cipher、TLS downgrade、
+`verify=False`を許可する引数やfallbackを設けない。数値IPへ接続しても、DNS名URLでは検証済みの
+original A-label hostnameを`server_hostname`としてSNIとhostname verificationへ渡し、IPへ置換しない。
 
 certificate failure、hostname mismatch、peer mismatchはsecurity failureとして直ちに終了コード4
 とし、同じreservation内の次IPやretryへ進まない。TCP/TLS connect timeoutは一時dependency
@@ -221,13 +248,81 @@ redirectは301、302、303、307、308だけを受理し、最大3 hopとする�
 port、userinfo、DNS全結果、pinning、TLS、peer IPを再検証し、loopとHTTP downgradeを拒否する。
 redirect auto-follow、cookie・auth・refererの持越しは禁止する。
 
-Phase 2Aのresponse検証を実streamへ適用する。
+Phase 2Aのresponse検証を実streamへ適用する。処理順は次へ固定する。
+
+```text
+raw response-head guard
+→ h11
+→ semantic validator
+```
+
+raw guardが成功するまでh11へ1 byteも渡さない。response headはstatus line先頭から最初の
+`\r\n\r\n`までとし、同一recvにbody bytesが含まれる場合はその位置で分離する。body bytesを
+header検証へ含めず、検証済みraw headも再構築せず受信したbyte列のままh11へ渡す。
+
+### 8.1 Raw response-head guard
+
+raw headの上限を次に固定する。
+
+| 対象 | 既定 | 絶対上限 |
+| --- | ---: | ---: |
+| status line先頭から終端CRLF CRLFまでの総byte数 | 32 KiB | 64 KiB |
+| raw header field数 | 64 | 100 |
+| 1 fieldのraw name+value byte数 | 4 KiB | 8 KiB |
+
+各上限はexact boundaryを許可し、`+1`で終了コード7、retry禁止とする。絶対上限を超える設定は
+clampせず通信前に拒否する。head未完了時の1回のrecvは残りhead予算`+1`以下とする。
+name+valueはcolonとCRLFを除くraw byte数、field countはraw field-line数として数える。
+
+raw bytesをoctet列として解析し、status lineは先頭の1本だけ、line終端はCRLFだけとする。
+bare LF、bare CR、NUL、CTL、obs-fold、不正なASCII tokenのfield-nameを拒否する。header名は
+ASCII case-insensitiveで比較するが、raw field順と出現回数はpair列のまま保持し、dict化しない。
+
+framing関連fieldはh11へ渡す前に次を検証する。
+
+- `Content-Length`は1 fieldだけ許可し、2回以上は同値でも拒否する
+- 単一`Content-Length` field内のcomma listを拒否し、値はASCII decimal digitsだけ許可する
+- `Transfer-Encoding`は1 field・1 tokenの`chunked`だけをASCII case-insensitiveで許可する
+- `Transfer-Encoding`のcomma list、parameter、duplicate field、未知codingを拒否する
+- `Content-Encoding`のraw出現数を保持し、複数fieldを拒否する
+- `Content-Length`と`Transfer-Encoding`の併存は即時に終了コード7とし、h11へ渡さない
+
+h11 event生成後もstatus、MIME、charset、Content-Encoding、framing、response body rulesを
+semantic validatorで再検証する。raw guardはh11の代替ではなく、h11が正規化・破棄する前の情報を
+検証する純粋なHTTP parser層内部処理である。
+
+### 8.2 Chunked framing guard
+
+Phase 2B初版ではchunk extensionとtrailerをすべて禁止する。許可するchunk-size lineは
+`1*HEXDIG CRLF`だけとし、semicolon、whitespace、sign、`0x` prefix、empty size、non-hexを拒否する。
+chunk-size lineの絶対上限は終端CRLFを含む128 bytesとする。128 bytesは許可し、129 bytesは
+終了コード7、retry禁止とする。宣言chunk sizeが残body予算を超える場合は、payload到着を待たず
+同じ扱いで拒否する。
+
+incremental framing guardは次の状態だけを持つ純粋処理とする。
+
+```text
+chunk-size
+chunk-data
+chunk-data-CRLF
+zero-chunk
+final-CRLF
+complete
+```
+
+size lineをraw guardで検証してから、そのraw bytesをh11へ渡す。chunk payloadは再構築せずstreaming
+し、zero chunk後はempty trailerを表す直後のCRLFだけを許可する。防御的な再検証として、h11の
+`EndOfMessage.headers`もemptyでなければ終了コード7、retry禁止とする。
+
+body上限はchunk framingを除いたh11 `Data.data`累計へ適用し、既定2 MiB、絶対4 MiBとする。
+exact boundaryは許可し、`+1`でsocketを閉じ、partial resultを採用せず、bodyを保存せず、retryせず、
+終了コード7とする。response headはheader hard limit、chunk-size lineは128-byte hard limit、
+decoded payloadはbody hard limitで制限し、各recvは現在状態の残予算`+1`以下とする。run total deadlineを
+最上位に維持し、新しい巨大なraw-wire予算は追加しない。
+
+### 8.3 Semantic response contract
 
 - 最終本文候補はstatus 200だけ
-- response既定2 MiB、絶対4 MiB、`limit + 1`で即停止
-- header総量は既定32 KiB・最大64 KiB、64件・最大100件、1件4 KiB・最大8 KiB
-- duplicate Content-Length、Content-LengthとTransfer-Encoding競合を拒否
-- Transfer-Encodingは正確なchunkedだけを許可し、h11で厳格にdecodeする
 - Content-Encodingは欠落またはidentityだけ。gzip、deflate、brを拒否
 - MIMEは`text/html`と`application/xhtml+xml`だけ
 - charset未指定時はUTF-8、BOMと宣言の不一致、unknown・multiple charsetを拒否
@@ -373,6 +468,18 @@ bodyやpartial resultを保存せず130を返す。
 fake sleep、fake filesystemを注入し、real DNS・socket・HTTPが0回であることを検証する。
 GitHub Actionsと通常test suiteでreal network testを禁止する。
 
+raw response-head guardはsingle Content-Length、同値・異値duplicate Content-Length、CLとTEの併存、
+duplicate TE、obs-fold、bare LF、bare CR、field count・single field・total headの超過とexact boundaryを
+bytes fixtureで検証する。chunk guardはnormal chunked、extension、non-empty・empty trailer、
+128-byte境界、malformed hex、body limit exact・`+1`をbytes fixtureで検証する。
+
+TLS keylog testはprocess isolationを必須とする。subprocessだけに`SSLKEYLOGFILE=<temporary path>`を
+設定してproduction SSLContext factoryを生成し、`keylog_filename is None`を確認する。その後、
+test fixture CAと`ssl.MemoryBIO`・`wrap_bio()`によるclient/server handshakeをsocket、DNS、HTTPなしで
+完了させ、keylog fileが新規作成されないこと、および既存fileなら内容が不変であることを確認する。
+同じ契約をPython 3.10、3.11、3.12、3.13で検証対象とする。fixture CAの利用はtest process内だけに
+限定し、productionのcustom CA入力経路を作る根拠にしない。
+
 実通信smoke testは次をすべて満たした後の別作業とする。
 
 1. Phase 2B全実装PRがレビュー承認されmainへ統合済み
@@ -386,18 +493,29 @@ smoke testを自動化、CI化、定期実行してはならない。
 
 ## 14. 依存・実装開始ゲート
 
-Phase 2B実装候補の`dnspython`と`h11`は、現在環境に存在する、または別packageのtransitive dependency
-であることを理由に暗黙利用しない。requirementsは本仕様作成時には変更しない。
+Phase 2B実装候補のdirect dependencyとversion rangeを次に固定する。
 
-Phase 2B PR 1開始前に、次を別レビューし、利用者の明示承認を得る。
+```text
+dnspython>=2.8,<2.9
+h11>=0.16,<0.17
+```
 
-- `dnspython`と`h11`のdirect dependency採用可否とversion range
-- license
-- Python 3.10～3.13互換性
-- Windows 11互換性
-- OS設定resolverを利用するDNS backend interface
-- socket、TLS、h11間のinterfaceとtimeout・peer検証位置
-- fake DNS/socket/TLS/byte stream backendの注入方法
+本仕様のdependency/security/interface reviewでは、license、Python 3.10～3.13、Windows 11、
+DNS・socket・TLS・h11 interface、fake backend注入、raw response-head、chunk extension・trailer、
+`SSLKEYLOGFILE`非参照契約を確認し、実装前のremaining security/interface issuesは0件となった。
+ただし、現在環境に存在する、または別packageのtransitive dependencyであることを理由に暗黙利用しない。
+requirementsは本仕様更新時には変更せず、利用者が次段階で依存追加を明示承認した後だけ追加する。
 
-この依存・interfaceレビュー承認前はPython実装を開始しない。依存追加承認は実通信承認ではない。
-実装承認もsmoke test承認ではなく、各ゲートを持ち越さない。Phase 2CとPhase 3は未着手のままとする。
+レビュー済みの依存契約を次に固定する。
+
+- `dnspython`はbase packageのみ、extrasなし、public APIだけを使用する
+- `try_ddr()`を禁止し、通信前にDo53Nameserverだけであることを確認する
+- DNSはA、AAAAの順に問い合わせ、各raw response順を維持し、retry時は両方再取得する
+- `h11`はHTTP/1.1 Sans-I/O parser/serializerだけに使用し、TLS・socket責務を持たせない
+- `h11` private APIを使用せず、raw response-head guard成功後だけbytesを投入する
+- `DnsQueryBackend`、`TlsConnector`、`TlsByteStream`、`Clock`、`Sleeper`、`FileStore`の最小境界を維持する
+- raw response-head guardとchunk framing guardはHTTP parser層内部の純粋処理とし、抽象を増やさない
+
+依存・interfaceレビューの完了はrequirements変更やPython実装の承認ではない。次段階で利用者が
+依存追加とPhase 2B PR 1実装を明示承認するまで開始しない。依存追加承認は実通信承認でもなく、
+実装承認もsmoke test承認ではない。各ゲートを持ち越さず、Phase 2CとPhase 3は未着手のままとする。
