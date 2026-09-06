@@ -92,3 +92,21 @@ class LockTests(unittest.TestCase):
             store.create_exclusive(path, b'original')
             with self.assertRaises(FileExistsError): store.create_exclusive(path, b'replacement')
             self.assertEqual(b'original', path.read_bytes())
+
+    def test_changed_public_owner_cannot_release(self):
+        store = FakeStore()
+        owner = acquire_lock(Path('fixture'), metadata().target_suffix, metadata(), store=store)
+        self.assertFalse(replace(owner, run_id='run-2').release())
+        self.assertIn(owner.path, store.files)
+        self.assertTrue(owner.release())
+
+    def test_fstat_failure_closes_descriptor_and_fails_closed(self):
+        import phase2_lock
+        real_close = phase2_lock.os.close
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'lock'
+            with patch('phase2_lock.os.fstat', side_effect=OSError('fixture')), patch('phase2_lock.os.close', wraps=real_close) as close:
+                with self.assertRaises(OSError): LocalFileStore().create_exclusive(path, b'payload')
+                close.assert_called_once()
+            # Without known inode ownership, leave the lock for manual recovery.
+            self.assertTrue(path.exists())

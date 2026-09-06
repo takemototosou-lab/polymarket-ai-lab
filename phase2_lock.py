@@ -38,7 +38,12 @@ def _validate(metadata):
 class LocalFileStore:
     def create_exclusive(self, path, payload):
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o600)
-        identity = os.fstat(descriptor)
+        try:
+            identity = os.fstat(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            # Ownership cannot be established: retain the lock, fail closed.
+            raise
         try:
             try:
                 handle = os.fdopen(descriptor, 'wb')
@@ -88,6 +93,8 @@ class Phase2Lock:
     _metadata: LockMetadata = field(repr=False)
 
     def release(self):
+        if self.run_id != self._metadata.run_id:
+            return False
         try:
             payload = self._store.read_bytes(self.path)
             decoded = json.loads(payload.decode('utf-8'), object_pairs_hook=_unique_object)
