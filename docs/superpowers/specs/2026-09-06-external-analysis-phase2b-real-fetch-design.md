@@ -131,12 +131,40 @@ resolverはURL policy通過済みのASCII hostnameを受け取り、次を満た
 
 - CNAME targetを各段でUTS #46 nontransitional・hostname構文検証する
 - CNAME loop、複数の矛盾するtarget、8段超過を拒否する
-- 最終hostnameのAとAAAAを明示取得する
-- IPは正規化・重複排除後もresolverが返した順を維持し、最大16件とする
-- 空結果、構文不正IP、unsafe IPを拒否する
+- 最終hostnameのAを先に、AAAAを後に明示取得する
+- A response内のrecord順とAAAA response内のrecord順をそれぞれ維持する
+- A列の後ろへAAAA列を連結してから正規化・重複排除し、最初の出現位置を維持する
+- 重複排除後のIPが16件を超える場合は切り詰めず拒否する
+- A・AAAAの両方が正常応答で0件なら空結果として拒否する
 - unsafe IPが1件でも含まれれば安全なIPだけを選び直さずURL全体を拒否する
 - IPv4、IPv6、IPv4-mapped IPv6をPhase 2AのIP policyで検証する
 - 一連のCNAME・A・AAAA処理を単一DNS deadlineへ含める
+
+最終IP順を次の手順に固定する。
+
+1. CNAME chainを確定する
+2. 最終hostnameのAを問い合わせ、response内のrecord順を保持する
+3. AAAAを問い合わせ、response内のrecord順を保持する
+4. A列の後ろへAAAA列を連結する
+5. IPを正規化し、最初の出現を残して重複排除する
+6. 16件上限と全IPの安全性を検証する
+7. 固定順を`DnsResolution.addresses`へ保存する
+8. transportはその先頭から最大4 IPだけをconnect候補にする
+
+例えばA responseが`203.0.113.10`、`203.0.113.11`、AAAA responseが`2001:db8::10`、
+`2001:db8::11`の順なら、統合順もこのA 2件、AAAA 2件の順になる。これらの例示IPは
+documentation rangeであるため、順序説明にだけ使用し、実通信ではunsafeとして全体を拒否する。
+
+Aが正常応答で0件または当該record typeなしを明確に示し、AAAAに1件以上のIPがある場合は
+AAAA列だけを候補にできる。AAAAが同様に0件またはrecord typeなしで、Aに1件以上ある場合は
+A列だけを候補にできる。両方が0件またはrecord typeなしなら拒否する。いずれか一方でも
+temporary DNS failureになった場合は、他方の部分結果だけを採用せず、DNS attempt全体を既存retry
+policyに従わせる。retryではA・AAAAを両方再取得する。具体的なrcode・exception mappingは
+依存・interfaceレビューで固定する。
+
+malformed response、conflicting CNAME、CNAME loop、構文不正IP、unsafe IPはfail closedとし、
+retry用の部分結果を返さない。A・AAAAのどちらかにunsafe IPが1件でもあれば、他方や同じresponseに
+safe IPが存在してもURL全体を拒否する。
 
 1回のHTTP attemptでは成功したresolutionを直ちにpinし、attempt途中で再解決しない。
 redirect先は新しいpolicy URLとして必ず新規DNSを行う。HTTP retryでは元URLでも再解決し、
@@ -156,7 +184,9 @@ HTTP/1.1 parser: h11
 `requests`は既存収集処理のため維持するが、Phase 2B real transportには使用しない。
 urllib3、requests、httpxの内部DNS、proxy、adapter、private socket取得へ依存しない。
 
-transportはresolver順を維持したverified IP集合と元のASCII hostnameを受け取る。
+transportはA response順、次にAAAA response順で固定されたverified IP集合と元のASCII hostnameを
+受け取る。Happy Eyeballs、IPv6優先、OSアドレス選択policy、transport側の並べ替えはPhase 2B初版で
+使用しない。将来必要になった場合は別設計とする。
 
 1. socketを数値IPへ直接接続し、hostnameをOSで再解決しない
 2. 1 logical request reservationにつき先頭から最大4 IPまで接続を試せる
