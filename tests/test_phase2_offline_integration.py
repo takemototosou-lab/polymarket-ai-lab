@@ -63,17 +63,29 @@ def offline_run(directory):
         with open(directory / 'audit.jsonl', 'x+b') as handle:
             writer = Phase2JsonlWriter(handle)
             writer.append(event())
-            writer.ensure_ready()
-            writer.append(event(sequence=1,event_type='request_reserved',status='reserved',attempt=1,request_count=1))
+            sequence = 1
+            counter = RequestCounter(10)
+            def emit(**kw):
+                nonlocal sequence
+                writer.append(event(sequence=sequence, request_count=counter.used, **kw))
+                sequence += 1
+            def reserve():
+                writer.ensure_ready()
+                counter.reserve()
+                emit(event_type='request_reserved',status='reserved',attempt=1)
+            class AuditedTransport:
+                def get(self, connection_plan, **kw):
+                    reserve()  # Every redirect hop consumes a request before get.
+                    return transport.get(connection_plan, **kw)
+            reserve()
             candidates = provider.search(request)
-            writer.append(event(sequence=2,event_type='search_finished',status='succeeded',attempt=1,request_limit=None,cost_limit_usd=None,request_count=1,selected_count=1))
-            writer.ensure_ready()
-            writer.append(event(sequence=3,event_type='request_reserved',status='reserved',attempt=1,request_count=2))
+            emit(event_type='search_finished',status='succeeded',attempt=1,request_limit=None,cost_limit_usd=None,selected_count=1)
             url = parse_policy_url(candidates[0].url)
             plan = build_connection_plan(url, resolver.resolve(url.hostname))
-            result = fetch_validated_html(plan, resolver=resolver, transport=transport, limits=FetchLimits(), now=lambda:'2026-08-03T00:00:00Z')
-            writer.append(replace(completed_event(4), request_count=2, response_byte_count=result.response_bytes))
-            writer.append(event(sequence=5,event_type='run_finished',status='succeeded',request_limit=None,cost_limit_usd=None,request_count=2,fetched_count=1,selected_count=1))
+            result = fetch_validated_html(plan, resolver=resolver, transport=AuditedTransport(), limits=FetchLimits(), now=lambda:'2026-08-03T00:00:00Z')
+            assert counter.used == 1 + len(transport.calls)
+            emit(event_type='fetch_finished',status='succeeded',attempt=1,request_limit=None,cost_limit_usd=None,response_byte_count=result.response_bytes,fetched_count=1,http_status=200)
+            emit(event_type='run_finished',status='succeeded',request_limit=None,cost_limit_usd=None,fetched_count=1,selected_count=1)
     return (directory / 'audit.jsonl').read_bytes(), candidates, result
 
 
@@ -98,6 +110,9 @@ class OfflineIntegrationTests(unittest.TestCase):
                 b = offline_run(second)
                 self.assertEqual(a, b)
                 self.assertEqual('<html>fixture</html>', a[2].decoded_html)
+                audit = [json.loads(line) for line in a[0].splitlines()]
+                self.assertEqual(3, audit[-1]['request_count'])
+                self.assertEqual([1,2,3], [e['request_count'] for e in audit if e['event_type'] == 'request_reserved'])
                 for sentinel in sentinels: sentinel.assert_not_called()
             self.assertEqual(before, hashes(data))
             self.assertFalse(list(root.rglob('*.lock')))
