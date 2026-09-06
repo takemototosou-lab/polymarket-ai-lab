@@ -31,6 +31,10 @@ APIキーの存在、provider名の設定、無料枠の表示、過去の承認
 を正本とする。本仕様はPhase 2の検索、取得、安全性、運用基盤の詳細正本である。
 
 既存外部AI設計のPhase 2概略と本仕様が矛盾する場合は本仕様の狭い契約を優先する。
+
+Phase 2Bの実URL取得については、さらに対象範囲が狭く日付が新しい
+`2026-09-06-external-analysis-phase2b-real-fetch-design.md`を詳細正本とする。Phase 2Bに
+関する矛盾時は同addendumを優先し、Phase 2AとPhase 2Cへ一般化しない。
 特に本仕様はHTTPSだけ、port 443だけ、HTML/XHTMLだけ、圧縮なしを許可する。
 推測で旧許可範囲と結合せず、矛盾が解消できなければ実装を停止する。
 
@@ -72,9 +76,9 @@ Brave SDKへ到達できてはならない。Phase 1 dry-runの動作を変更�
 byte、timeout検査を小さい上限で検証する。
 
 承認は指定URLと1回の試験に限定し、将来実行や別URLへ持ち越さない。
-preflightでhost、最大redirect、byte、timeout、最大HTTP request数を表示した後、対話CLIで
-`FETCH 1 <hostname>`の完全一致確認を要求する。非対話実行、CLI flagだけ、環境変数だけでは
-承認成立とせず拒否する。
+preflightでURL、最大redirect、byte、timeout、最大HTTP request reservation数を表示した後、
+対話CLIでASCII大文字4文字の`FETCH`との完全一致確認を要求する。非対話実行、CLI flagだけ、
+環境変数だけでは承認成立とせず拒否する。詳細はPhase 2B addendumに従う。
 
 ### 3.3 Phase 2C: Brave候補検索試験
 
@@ -175,9 +179,10 @@ HostとTLS SNI以外をredirect先へ動的追加しない。`Content-Encoding`�
 `identity`だけを受理し、gzip、deflate、br、複数encoding、unknown encodingを拒否する。
 これによりPhase 2初期版は圧縮bombを展開しない。
 
-Phase 2B/2Cでpublisher本文を取得する前には、既存外部AI正本のrobots契約も適用する。
-robots取得自体を同じURL・SSRF・redirect・response上限で検証し、HTTP request数と全体
-timeoutへ算入する。robotsの実通信もPhase 2B/2Cの明示承認範囲外では行わない。
+Phase 2Bでは、手動指定された1 URL以外への自動通信を避けるためrobots.txtを取得しない。
+これはPhase 2C以降の自動検索・crawlingでrobots確認を不要とする決定ではない。Phase 2C以降で
+publisher本文を取得する前のrobots契約は、追加URLの承認、request accounting、timeoutを含めて
+別途再検討し、実行直前の明示承認範囲外では通信しない。
 
 ## 8. Response hard max・status契約
 
@@ -199,12 +204,14 @@ timeoutへ算入する。robotsの実通信もPhase 2B/2Cの明示承認範囲�
 | header数 | 64 | 100 |
 | 1 header name+value | 4,096 bytes | 8,192 bytes |
 
-`POLYMARKET_FETCH_TIMEOUT_SECONDS`はDNSを除く1 URL/hopのconnectからbody完了までの
-total deadlineであり、connect/read個別上限を含む。市場全体は既存
-`POLYMARKET_RUN_TIMEOUT_SECONDS`の既定1,200秒・絶対上限3,600秒にも従う。
+Phase 2Bの`POLYMARKET_FETCH_TIMEOUT_SECONDS`は、initial audit log成功後の最初のDNS直前から
+最終response検証またはfailure確定までの1 URL run全体のdeadlineである。DNS、redirect、retry、
+`Retry-After`を含み、confirmation待ちとlock取得前処理を含まない。詳細はPhase 2B addendumに
+従う。Phase 2Cのtimeoutは、その実装前の別設計で固定する。
 fetch件数は新しい候補URLの取得開始数であり、redirect hopとretryを件数増枠には使わない。
-一方、実HTTP request数は初回、robots、redirect各hop、retryをすべて個別に数え、実行前の
-request hard maxと予算予約へ算入する。
+一方、実HTTP request数は初回、redirect各hop、retryをすべて個別に数え、実行前のrequest
+hard maxと予算予約へ算入する。Phase 2C以降でrobots取得を導入する場合は、robotsのrequestも
+同様に算入する。
 
 本文候補として受理するstatusは200だけ。redirectは6節、429・502・503・504は13節の
 retry候補、その他1xx/2xx/3xx/4xx/5xxは本文不採用とする。204等bodyなしも不採用。
@@ -359,6 +366,10 @@ Phase 2A/2Cの同じdata directory・同suffix処理は
 `.external_analysis_<suffix>.lock`を同一directoryへ排他的新規作成して二重実行を防ぐ。
 Phase 1 dry-runにはlockを追加しない。
 
+Phase 2Bはこの日付suffix lockを流用せず、Phase 2B addendumで定める専用runtime directory内の
+`.external_analysis_phase2b.lock`と固定`target_suffix = "phase2b"`を使用する。Phase 2Aのlock形式、
+validation、既存byte列は変更しない。
+
 lockはUTF-8 BOMなし・LF・末尾LFの固定JSONで、`lock_version`、`run_id`、
 `started_at`、`target_suffix`の4キーだけを持つ。APIキー、query、URL、PID、username、
 hostnameを保存しない。PID/hostnameはcontainer・Windows間で生存確認が曖昧でprivacyも
@@ -373,9 +384,13 @@ hostnameを保存しない。PID/hostnameはcontainer・Windows間で生存確�
 
 ## 15. JSONL log契約
 
-logは正式data成果物と分けた`data/logs/`に、1実行1ファイルで保存する。Phase 2Aでは
-fake directoryだけを使い、Phase 1 dry-runへ追加しない。UTF-8 BOMなし、LF、末尾LF、
-1行1object、duplicate keyなし、1行8,192 bytes、1ファイル4 MiBを絶対上限とする。
+Phase 2A/2Cのlogは正式data成果物と分けた`data/logs/`に、1実行1ファイルで保存する。
+Phase 2Aではfake directoryだけを使い、Phase 1 dry-runへ追加しない。UTF-8 BOMなし、LF、
+末尾LF、1行1object、duplicate keyなし、1行8,192 bytes、1ファイル4 MiBを絶対上限とする。
+
+Phase 2BはPhase 2A serializerへ値を追加せず、Phase 2B addendumで定める別policyを使用する。
+同じ21キー順を維持し、`schema_version = "1.0"`、`phase = "2b"`、`provider = null`、
+`query_kind = null`、`cost_limit_usd = 0`とする。Phase 2B初版は新fieldとURL digestを追加しない。
 
 固定共通キー順:
 
@@ -489,6 +504,7 @@ Phase 2Aは同じfake入力、clock、resolver、transport、providerから同�
 
 ### 19.2 Phase 2B
 
+- Phase 2B addendumと依存・interfaceレビューが承認済み
 - safe fetcher実装PRが承認・統合済み
 - SSRF、DNS pinning、peer IP、redirect、上限、MIMEのmock test成功
 - 利用者が1 URL、1回、byte/timeout上限を実行直前に明示承認

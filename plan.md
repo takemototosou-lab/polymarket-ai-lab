@@ -225,7 +225,37 @@ PR 2もproduction CLIへ接続せず、fake mappingと注入関数だけで動�
 - [x] Phase 1・PR 1/2・実データ・依存関係・正本設計書は未変更
 - [x] 評価指標だけの参考メモを`docs/research/analysis-feature-roadmap.md`へ保存
 
-Phase 2A PR 3はDraftレビュー待ち。production CLIは未接続。外部通信・APIキー参照・料金発生経路・契約変更なし。lock/logはテスト一時領域のみ。Phase 2B/2CとPhase 3は未着手で、それぞれの承認を先取りしない。log失敗時の部分行、所有確認不能・crash時の残存lockは自動回復しない。
+Phase 2A PR 3はmainへ統合済みで、Phase 2Aは正式完了した。production CLIは未接続。外部通信・APIキー参照・料金発生経路・契約変更なし。lock/logはテスト一時領域のみ。log失敗時の部分行、所有確認不能・crash時の残存lockは自動回復しない。
+
+## 外部分析 Phase 2B 設計レビュー
+
+- [x] 手動指定HTTPS URL 1件だけを対象とする最小スコープを固定
+- [x] robots.txt取得禁止と、Phase 2C以降でのrobots契約再検討を固定
+- [x] exact `FETCH`、confirmation省略禁止、拒否時終了コード3を固定
+- [x] DNS・redirect・retry・Retry-Afterを含む1 run全体の15秒／最大60秒deadlineを固定
+- [x] Phase 2A serializerを変更しないPhase 2B専用21キーlog policyを固定
+- [x] `.external_analysis_phase2b.lock`と`target_suffix = "phase2b"`のfixed-scope lockを固定
+- [x] 必須`--runtime-dir`、既定・environment fallback・directory自動作成なしを固定
+- [x] OS設定recursive resolverを利用するDNS client、CNAME最大8、IP最大16を固定
+- [x] retry時とredirect先の再解決、attempt内pin、resolver順維持を固定
+- [x] 1 reservation内のconnect failover最大4 IPを固定
+- [x] socket接続前に消費するlogical HTTP GET reservationと既定8／最大12を固定
+- [x] `socket` + `ssl` + `h11`と`dnspython`をreal transport候補として固定
+- [x] TLS security failureを4、Ctrl+Cを130、decoded HTMLを20,000文字に固定
+- [x] 12,000文字のsource extractionを将来工程として分離
+- [x] 独立experimental CLI候補と、通常テスト・CIでのreal network禁止を固定
+- [x] Phase 2B addendumを詳細正本として作成
+
+Phase 2BのPython実装はまだ開始しない。PR 1開始前に次の依存・interfaceレビューを別途行い、利用者の明示承認を得る。
+
+- [ ] `dnspython`のdirect dependency採用可否とversion range
+- [ ] `h11`のdirect dependency採用可否とversion range
+- [ ] 両依存のlicense、Python 3.10～3.13、Windows 11互換性
+- [ ] OS設定resolverを利用するDNS backend interface
+- [ ] socket・TLS・h11間のinterfaceとtimeout・peer IP検証位置
+- [ ] fake DNS・socket・TLS・byte stream backendの注入方法
+
+依存追加承認前はPhase 2B実装を開始しない。依存承認、実装承認、実通信smoke test承認は別ゲートとし、持ち越さない。実通信smoke testはPhase 2B全実装のレビュー・main統合後、利用者がその場で1 URLと上限を確認しexact `FETCH`を入力した別作業でのみ実行候補とする。Phase 2CとPhase 3は未着手である。
 
 ## 公共仕様との差異
 
@@ -241,11 +271,16 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] 市場説明・解決情報源を11列→14列→14キーへ伝播
 - [x] `SCHEMA_VERSION = "2.0"`へpending結果を移行
 - [x] 外部AI Phase 1 foundation（通信なしdry-run）
-- [x] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave設計レビュー
+- [x] Phase 2A/2B/2Cのsafe URL fetcher・SSRF・Brave概略設計レビュー
 - [x] Phase 2A完全オフライン基盤の3 PR実装計画
 - [x] Phase 2A PR 1（内部契約・URL・IDNA・IP・fake DNS）
 - [x] Phase 2A PR 2（fake fetch・redirect・response・retry、統合済み）
-- [x] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、Draftレビュー待ち）
+- [x] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、統合済み）
+- [x] Phase 2B実URL安全取得の詳細設計レビューとaddendum
+- [ ] Phase 2B依存・interfaceレビュー（依存追加前の開始ゲート）
+- [ ] Phase 2B実装（依存・interface承認前は開始禁止）
+- [ ] Phase 2C Brave候補検索（別設計・料金確認・明示承認前は開始禁止）
+- [ ] Phase 3 OpenAI分析（別設計・料金確認・明示承認前は開始禁止）
 - [ ] 固定JSONの最大10市場だけをAIで分析
 - [ ] AI推定確率と市場価格の差を記録
 - [ ] 決着後に精度と収益性を評価
