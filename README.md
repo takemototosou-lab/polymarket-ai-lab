@@ -306,7 +306,7 @@ CSVは取得時点のスナップショットです。過去の検証では、�
 python -m unittest discover -s tests -v
 ```
 
-単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2B PR 1のDNS/TLSオフライン検証を含めて全280テストが成功しています。
+単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2B PR 1のDNS/TLSオフライン検証を含めて全301テストが成功しています。
 
 ## 使用API
 
