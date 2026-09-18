@@ -253,8 +253,8 @@ Phase 2A PR 3はmainへ統合済みで、Phase 2Aは正式完了した。product
 - [x] `SSLKEYLOGFILE`を参照しない明示SSLContext生成とprocess-isolated test契約を固定
 - [x] Phase 2B実装前のremaining security/interface issuesが0件であることを確認
 
-Phase 2BのPython実装はまだ開始しない。依存・security・interfaceレビューは完了したが、
-requirementsへのdirect dependency追加とPhase 2B PR 1実装は、次段階の利用者明示承認まで開始しない。
+Phase 2B PR 1は利用者承認後に実装済み。DNS/TLS基盤だけを追加し、production CLIへは未接続で、
+HTTP parser、redirect orchestration、retry統合、lock/log統合、実通信smoke testは次工程へ分離した。
 
 - [x] `dnspython`のdirect dependency採用可否とversion range
 - [x] `h11`のdirect dependency採用可否とversion range
@@ -262,10 +262,14 @@ requirementsへのdirect dependency追加とPhase 2B PR 1実装は、次段階�
 - [x] OS設定resolverを利用するDNS backend interface
 - [x] socket・TLS・h11間のinterfaceとtimeout・peer IP検証位置
 - [x] fake DNS・socket・TLS・byte stream backendの注入方法
-- [ ] requirementsへ`dnspython`と`h11`をdirect dependencyとして追加
-- [ ] Phase 2B PR 1実装
+- [x] requirementsへ`dnspython`と`h11`をdirect dependencyとして追加
+- [x] Phase 2B PR 1：Do53 DNS backend、A→AAAA、CNAME/IP上限、全IP fail-closed
+- [x] Phase 2B PR 1：system trust TLS context、DNS-pinned numeric IP接続、SNI/hostname/peer検証
+- [x] Phase 2B PR 1：最大4 IP failover、fake backend/socket/TLS stream、process-isolated keylog test
+- [x] Phase 2B PR 1：通常テストでreal DNS/socket/TLS network/HTTP 0回、production CLI未接続
+- [x] Phase 2B PR 1：全280テスト、Python 34ファイル構文、diff check成功
 
-依存追加承認前はPhase 2B実装を開始しない。依存承認、実装承認、実通信smoke test承認は別ゲートとし、持ち越さない。実通信smoke testはPhase 2B全実装のレビュー・main統合後、利用者がその場で1 URLと上限を確認しexact `FETCH`を入力した別作業でのみ実行候補とする。Phase 2CとPhase 3は未着手である。
+依存追加とPR 1実装の承認は消化済みだが、実通信smoke test承認は別ゲートであり持ち越さない。実通信smoke testはPhase 2B全実装のレビュー・main統合後、利用者がその場で1 URLと上限を確認しexact `FETCH`を入力した別作業でのみ実行候補とする。Phase 2CとPhase 3は未着手である。
 
 ## 公共仕様との差異
 
@@ -288,8 +292,11 @@ Gamma APIのkeyset仕様ページでは並び順の例が`volume_num`だが、20
 - [x] Phase 2A PR 3（fake search・lock・log・完全オフライン統合、統合済み）
 - [x] Phase 2B実URL安全取得の詳細設計レビューとaddendum
 - [x] Phase 2B依存・security・interfaceレビュー（remaining issues 0件）
-- [ ] Phase 2B direct dependency追加（別承認ゲート）
-- [ ] Phase 2B実装（依存・interface承認前は開始禁止）
+- [x] Phase 2B direct dependency追加（PR 1）
+- [x] Phase 2B PR 1 DNS/TLS基盤（production CLI未接続、実通信なし）
+- [ ] Phase 2B PR 2 HTTP parser・redirect・orchestration（別実装・レビュー）
+- [ ] Phase 2B production CLI・lock/log統合（別実装・レビュー）
+- [ ] Phase 2B実通信smoke test（別の実行直前承認が必要）
 - [ ] Phase 2C Brave候補検索（別設計・料金確認・明示承認前は開始禁止）
 - [ ] Phase 3 OpenAI分析（別設計・料金確認・明示承認前は開始禁止）
 - [ ] 固定JSONの最大10市場だけをAIで分析

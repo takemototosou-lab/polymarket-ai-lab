@@ -193,8 +193,11 @@ class OfflineIntegrationTests(unittest.TestCase):
         self.assertEqual([], calls)
 
     def test_phase2_imports_and_environment_references(self):
-        forbidden = ('socket','urllib.request','http.client','requests','httpx','aiohttp','openai','brave','subprocess','importlib')
+        common_forbidden = ('urllib.request','http.client','requests','httpx','aiohttp','openai','brave','subprocess','importlib')
         for path in ROOT.glob('phase2_*.py'):
+            forbidden = common_forbidden
+            if path.name != 'phase2_tls.py':
+                forbidden += ('socket',)
             source = path.read_text(encoding='utf-8')
             tree = ast.parse(source)
             for node in ast.walk(tree):
