@@ -25,7 +25,32 @@ from phase2_contracts import (
 )
 
 
+def _phase2b_contracts():
+    from phase2_contracts import (
+        DnsQueryBackend,
+        DnsQueryResult,
+        TlsByteStream,
+        TlsConnector,
+    )
+
+    return DnsQueryBackend, DnsQueryResult, TlsByteStream, TlsConnector
+
+
 class ContractTests(unittest.TestCase):
+    def test_phase2b_boundary_contracts_are_fixed(self):
+        DnsQueryBackend, DnsQueryResult, TlsByteStream, TlsConnector = (
+            _phase2b_contracts()
+        )
+        self.assertEqual(
+            ("hostname", "canonical_hostname", "addresses", "cname_chain"),
+            tuple(field.name for field in fields(DnsQueryResult)),
+        )
+        result = DnsQueryResult("example.com", "example.com", ("8.8.8.8",), ())
+        with self.assertRaises(FrozenInstanceError):
+            result.hostname = "changed.example"
+        for protocol in (DnsQueryBackend, TlsByteStream, TlsConnector):
+            self.assertTrue(getattr(protocol, "_is_runtime_protocol", False))
+
     def test_query_kind_values_are_fixed(self):
         self.assertEqual(
             ("official", "status", "support", "counter"),

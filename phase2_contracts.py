@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class QueryKind(str, Enum):
@@ -70,9 +70,48 @@ class DnsResolution:
 
 
 @dataclass(frozen=True)
+class DnsQueryResult:
+    hostname: str
+    canonical_hostname: str
+    addresses: tuple[str, ...]
+    cname_chain: tuple[str, ...]
+
+
+@runtime_checkable
+class DnsQueryBackend(Protocol):
+    def query(
+        self, hostname: str, rdtype: str, timeout_seconds: float
+    ) -> DnsQueryResult:
+        """Return one immutable A or AAAA query result."""
+
+
+@dataclass(frozen=True)
 class ConnectionPlan:
     url: PolicyUrl
     verified_ips: tuple[str, ...]
+
+
+@runtime_checkable
+class TlsByteStream(Protocol):
+    def peer_ip(self) -> str:
+        """Return the connected numeric peer address."""
+
+    def send_all(self, data: bytes) -> None:
+        """Send every byte or fail."""
+
+    def receive(self, max_bytes: int) -> bytes:
+        """Receive at most max_bytes."""
+
+    def close(self) -> None:
+        """Close the owned stream."""
+
+
+@runtime_checkable
+class TlsConnector(Protocol):
+    def connect(
+        self, plan: ConnectionPlan, timeout_seconds: float
+    ) -> TlsByteStream:
+        """Connect to a pinned numeric IP using the original hostname."""
 
 
 @dataclass(frozen=True)
