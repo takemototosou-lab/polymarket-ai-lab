@@ -107,6 +107,7 @@ class DnspythonQueryBackend:
                 rdtype,
                 search=False,
                 lifetime=timeout,
+                raise_on_no_answer=False,
             )
         except dns.resolver.NoAnswer:
             return DnsQueryResult(hostname, hostname, (), ())

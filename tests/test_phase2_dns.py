@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import dns.exception
 import dns.nameserver
@@ -165,9 +166,57 @@ class DnspythonBackendTests(unittest.TestCase):
         answer = backend.query("example.com", "A", 5.0)
         self.assertEqual((), answer.addresses)
         self.assertEqual(
-            [("example.com", "A", {"search": False, "lifetime": 5.0})],
+            [
+                (
+                    "example.com",
+                    "A",
+                    {
+                        "search": False,
+                        "lifetime": 5.0,
+                        "raise_on_no_answer": False,
+                    },
+                )
+            ],
             resolver.calls,
         )
+
+    def test_preserves_cname_when_requested_family_has_no_addresses(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        class Name:
+            def __init__(self, value):
+                self.value = value
+
+            def __str__(self):
+                return self.value
+
+        class CnameRecord:
+            target = Name("target.example.")
+
+        class CnameRrset:
+            rdtype = dns.rdatatype.CNAME
+
+            def __iter__(self):
+                return iter((CnameRecord(),))
+
+        class EmptyAnswer:
+            canonical_name = Name("target.example.")
+            response = SimpleNamespace(answer=(CnameRrset(),))
+
+            def __iter__(self):
+                return iter(())
+
+        class EmptyAnswerResolver(FakeResolver):
+            def resolve(self, hostname, rdtype, **kwargs):
+                self.calls.append((hostname, rdtype, kwargs))
+                return EmptyAnswer()
+
+        answer = DnspythonQueryBackend(
+            EmptyAnswerResolver(["192.168.1.1"])
+        ).query("example.com", "AAAA", 5)
+        self.assertEqual("target.example", answer.canonical_hostname)
+        self.assertEqual(("target.example",), answer.cname_chain)
+        self.assertEqual((), answer.addresses)
 
     def test_rejects_non_do53_nameserver_before_query(self):
         from phase2_dns import DnspythonQueryBackend
