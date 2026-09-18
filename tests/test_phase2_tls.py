@@ -36,17 +36,23 @@ class FakeTlsSocket:
 
 
 class FakeRawSocket:
-    def __init__(self, outcome=None):
+    def __init__(self, outcome=None, clock=None, duration=0):
         self.outcome = outcome
+        self.clock = clock
+        self.duration = duration
         self.connected = None
         self.timeout = None
+        self.timeouts = []
         self.closed = False
 
     def settimeout(self, value):
         self.timeout = value
+        self.timeouts.append(value)
 
     def connect(self, address):
         self.connected = address
+        if self.clock is not None:
+            self.clock.advance(self.duration)
         if isinstance(self.outcome, Exception):
             raise self.outcome
 
@@ -62,6 +68,17 @@ class FakeContext:
     def wrap_socket(self, raw, server_hostname):
         self.server_hostname = server_hostname
         return self.tls_socket
+
+
+class FakeMonotonicClock:
+    def __init__(self, start=0):
+        self.current = float(start)
+
+    def __call__(self):
+        return self.current
+
+    def advance(self, seconds):
+        self.current += float(seconds)
 
 
 class TlsContextTests(unittest.TestCase):
@@ -146,6 +163,115 @@ class PinnedTlsConnectorTests(unittest.TestCase):
                 5,
             )
         self.assertEqual(4, len(calls))
+
+    def test_connect_failover_uses_remaining_shared_deadline(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock(10)
+        first = FakeRawSocket(OSError("down"), clock, 2)
+        second = FakeRawSocket(clock=clock)
+        sockets = [first, second]
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: sockets.pop(0),
+            context_factory=lambda: FakeContext(FakeTlsSocket(peer="1.1.1.1")),
+            clock=clock,
+        )
+        connector.connect(self._plan("8.8.8.8", "1.1.1.1"), 5)
+        self.assertEqual([5], first.timeouts)
+        self.assertEqual([3, 3], second.timeouts)
+
+    def test_late_failover_gets_only_one_remaining_second(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock()
+        first = FakeRawSocket(OSError("down"), clock, 4)
+        second = FakeRawSocket(clock=clock)
+        sockets = [first, second]
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: sockets.pop(0),
+            context_factory=lambda: FakeContext(FakeTlsSocket(peer="1.1.1.1")),
+            clock=clock,
+        )
+        connector.connect(self._plan("8.8.8.8", "1.1.1.1"), 5)
+        self.assertEqual([1, 1], second.timeouts)
+
+    def test_exhausted_deadline_does_not_try_the_next_ip(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock()
+        first = FakeRawSocket(OSError("down"), clock, 5)
+        calls = []
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: calls.append(family) or first,
+            context_factory=lambda: FakeContext(FakeTlsSocket()),
+            clock=clock,
+        )
+        with self.assertRaises(DependencyError):
+            connector.connect(self._plan("8.8.8.8", "1.1.1.1"), 5)
+        self.assertEqual(1, len(calls))
+
+    def test_four_ip_failover_never_restarts_the_timeout(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock()
+        created = [FakeRawSocket(OSError("down"), clock, 1) for _ in range(4)]
+        available = list(created)
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: available.pop(0),
+            context_factory=lambda: FakeContext(FakeTlsSocket()),
+            clock=clock,
+        )
+        with self.assertRaises(DependencyError):
+            connector.connect(
+                self._plan("8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4"),
+                5,
+            )
+        self.assertEqual([], available)
+        self.assertEqual([[5], [4], [3], [2]], [raw.timeouts for raw in created])
+        self.assertEqual(4, clock.current)
+
+    def test_tls_handshake_uses_remaining_connect_deadline(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock()
+        raw = FakeRawSocket(clock=clock, duration=2)
+
+        class TimedContext:
+            def wrap_socket(self, value, server_hostname):
+                self.timeout_at_handshake = value.timeout
+                clock.advance(1)
+                return FakeTlsSocket()
+
+        context = TimedContext()
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: raw,
+            context_factory=lambda: context,
+            clock=clock,
+        )
+        connector.connect(self._plan("8.8.8.8"), 5)
+        self.assertEqual([5, 3], raw.timeouts)
+        self.assertEqual(3, context.timeout_at_handshake)
+
+    def test_tls_stream_is_closed_when_handshake_exhausts_deadline(self):
+        from phase2_tls import PinnedTlsConnector
+
+        clock = FakeMonotonicClock()
+        raw = FakeRawSocket(clock=clock, duration=2)
+        tls = FakeTlsSocket()
+
+        class ExhaustingContext:
+            def wrap_socket(self, value, server_hostname):
+                clock.advance(3)
+                return tls
+
+        connector = PinnedTlsConnector(
+            socket_factory=lambda family: raw,
+            context_factory=ExhaustingContext,
+            clock=clock,
+        )
+        with self.assertRaises(DependencyError):
+            connector.connect(self._plan("8.8.8.8"), 5)
+        self.assertTrue(tls.closed)
 
     def test_certificate_failure_stops_without_failover(self):
         from phase2_tls import PinnedTlsConnector

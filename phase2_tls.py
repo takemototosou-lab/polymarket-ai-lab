@@ -4,6 +4,7 @@ import ipaddress
 import math
 import socket
 import ssl
+import time
 from collections.abc import Callable
 
 from phase2_contracts import ConnectionPlan, DependencyError, UrlSafetyError
@@ -21,6 +22,23 @@ def _validated_timeout(value: float) -> float:
     if not math.isfinite(result) or result <= 0 or result > 15:
         raise ValueError("TLS timeout must be within 15 seconds")
     return result
+
+
+def _clock_value(clock: Callable[[], float]) -> float:
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DependencyError("TLS monotonic clock returned an invalid value")
+    result = float(value)
+    if not math.isfinite(result):
+        raise DependencyError("TLS monotonic clock returned an invalid value")
+    return result
+
+
+def _remaining_seconds(deadline: float, clock: Callable[[], float]) -> float:
+    remaining = deadline - _clock_value(clock)
+    if remaining <= 0:
+        raise DependencyError("TLS connection deadline exceeded")
+    return remaining
 
 
 def _validate_phase2_ssl_context(context: ssl.SSLContext) -> None:
@@ -99,17 +117,21 @@ class PinnedTlsConnector:
         *,
         socket_factory: Callable[[int], object] | None = None,
         context_factory: Callable[[], object] = create_phase2_ssl_context,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._socket_factory = socket_factory or (
             lambda family: socket.socket(family, socket.SOCK_STREAM)
         )
         self._context_factory = context_factory
+        self._clock = clock
 
     def connect(self, plan: ConnectionPlan, timeout_seconds: float):
         timeout = _validated_timeout(timeout_seconds)
+        deadline = _clock_value(self._clock) + timeout
         context = self._context_factory()
         last_error = None
         for value in plan.verified_ips[:MAX_CONNECT_IPS]:
+            remaining = _remaining_seconds(deadline, self._clock)
             normalized = validate_global_ip(value)
             address = ipaddress.ip_address(normalized)
             family = socket.AF_INET if address.version == 4 else socket.AF_INET6
@@ -119,20 +141,27 @@ class PinnedTlsConnector:
                 else (normalized, plan.url.port, 0, 0)
             )
             raw = self._socket_factory(family)
+            tls_stream = None
             try:
-                raw.settimeout(timeout)
+                remaining = _remaining_seconds(deadline, self._clock)
+                raw.settimeout(remaining)
                 raw.connect(endpoint)
+                raw.settimeout(_remaining_seconds(deadline, self._clock))
                 tls_stream = context.wrap_socket(
                     raw, server_hostname=plan.url.hostname
                 )
+                _remaining_seconds(deadline, self._clock)
+            except DependencyError:
+                (tls_stream if tls_stream is not None else raw).close()
+                raise
             except ssl.SSLCertVerificationError as error:
-                raw.close()
+                (tls_stream if tls_stream is not None else raw).close()
                 raise UrlSafetyError("TLS certificate validation failed") from error
             except ssl.SSLError as error:
-                raw.close()
+                (tls_stream if tls_stream is not None else raw).close()
                 raise UrlSafetyError("TLS security negotiation failed") from error
             except (socket.timeout, TimeoutError, ConnectionError, OSError) as error:
-                raw.close()
+                (tls_stream if tls_stream is not None else raw).close()
                 last_error = error
                 continue
 

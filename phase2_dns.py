@@ -2,6 +2,8 @@
 
 import ipaddress
 import math
+import time
+from collections.abc import Callable
 
 import dns.exception
 import dns.nameserver
@@ -20,6 +22,10 @@ from phase2_url_policy import parse_policy_url
 
 
 def _validated_hostname(value: str) -> str:
+    if not isinstance(value, str) or any(
+        character in value for character in "/?#@[]:"
+    ):
+        raise UrlSafetyError("DNS hostname is invalid")
     try:
         return parse_policy_url(f"https://{value}/").hostname
     except (TypeError, ValueError, UrlSafetyError) as error:
@@ -35,42 +41,84 @@ def _validated_timeout(value: float) -> float:
     return result
 
 
+def _clock_value(clock: Callable[[], float]) -> float:
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DependencyError("DNS monotonic clock returned an invalid value")
+    result = float(value)
+    if not math.isfinite(result):
+        raise DependencyError("DNS monotonic clock returned an invalid value")
+    return result
+
+
+def _remaining_seconds(deadline: float, clock: Callable[[], float]) -> float:
+    remaining = deadline - _clock_value(clock)
+    if remaining <= 0:
+        raise DependencyError("DNS attempt deadline exceeded")
+    return remaining
+
+
 def resolve_phase2_dns(
     hostname: str,
     backend: DnsQueryBackend,
     timeout_seconds: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> DnsResolution:
-    """Resolve A then AAAA and reject any unsafe partial DNS result."""
+    """Resolve CNAME then A and AAAA under one fail-closed deadline."""
 
     hostname = _validated_hostname(hostname)
     timeout = _validated_timeout(timeout_seconds)
-    answers = tuple(
-        backend.query(hostname, rdtype, timeout) for rdtype in ("A", "AAAA")
-    )
-    if any(answer.hostname != hostname for answer in answers):
+    deadline = _clock_value(clock) + timeout
+    chain = []
+    visited = {hostname}
+    canonical = hostname
+    while True:
+        cname_answer = backend.query(
+            canonical, "CNAME", _remaining_seconds(deadline, clock)
+        )
+        _remaining_seconds(deadline, clock)
+        if cname_answer.hostname != canonical or cname_answer.addresses:
+            raise UrlSafetyError("DNS CNAME answer does not match the query")
+        answer_chain = cname_answer.cname_chain
+        answer_canonical = _validated_hostname(cname_answer.canonical_hostname)
+        if not answer_chain:
+            if answer_canonical != canonical:
+                raise UrlSafetyError("DNS canonical host lacks a CNAME chain")
+            break
+        for target in answer_chain:
+            normalized = _validated_hostname(target)
+            if normalized in visited:
+                raise UrlSafetyError("DNS CNAME chain contains a loop")
+            chain.append(normalized)
+            if len(chain) > 8:
+                raise UrlSafetyError("DNS CNAME chain exceeds the hop limit")
+            visited.add(normalized)
+        canonical = chain[-1]
+        if answer_canonical != canonical:
+            raise UrlSafetyError("DNS CNAME chain does not reach canonical host")
+
+    answers = []
+    for rdtype in ("A", "AAAA"):
+        remaining = _remaining_seconds(deadline, clock)
+        answers.append(backend.query(canonical, rdtype, remaining))
+        _remaining_seconds(deadline, clock)
+    answers = tuple(answers)
+    if any(answer.hostname != canonical for answer in answers):
         raise UrlSafetyError("DNS answer hostname does not match the query")
-    if (
-        answers[0].canonical_hostname != answers[1].canonical_hostname
-        or answers[0].cname_chain != answers[1].cname_chain
+    if any(
+        answer.canonical_hostname != canonical or answer.cname_chain
+        for answer in answers
     ):
         raise UrlSafetyError("DNS families have conflicting CNAME results")
-
-    chain = answers[0].cname_chain
-    if len(chain) > 8 or len(set(chain)) != len(chain):
-        raise UrlSafetyError("DNS CNAME chain is invalid")
-    for target in chain:
-        _validated_hostname(target)
-    canonical = _validated_hostname(answers[0].canonical_hostname)
-    if chain and chain[-1] != canonical:
-        raise UrlSafetyError("DNS CNAME chain does not end at the canonical host")
 
     resolution = DnsResolution(
         hostname=hostname,
         addresses=answers[0].addresses + answers[1].addresses,
-        cname_chain=chain,
+        cname_chain=tuple(chain),
     )
     plan = build_connection_plan(parse_policy_url(f"https://{hostname}/"), resolution)
-    return DnsResolution(hostname, plan.verified_ips, chain)
+    return DnsResolution(hostname, plan.verified_ips, tuple(chain))
 
 
 class DnspythonQueryBackend:
@@ -97,8 +145,8 @@ class DnspythonQueryBackend:
     def query(
         self, hostname: str, rdtype: str, timeout_seconds: float
     ) -> DnsQueryResult:
-        if rdtype not in {"A", "AAAA"}:
-            raise ValueError("DNS record type must be A or AAAA")
+        if rdtype not in {"CNAME", "A", "AAAA"}:
+            raise ValueError("DNS record type must be CNAME, A, or AAAA")
         hostname = _validated_hostname(hostname)
         timeout = _validated_timeout(timeout_seconds)
         try:
@@ -118,14 +166,73 @@ class DnspythonQueryBackend:
         except dns.exception.DNSException as error:
             raise UrlSafetyError("DNS response is invalid") from error
 
-        canonical = _validated_hostname(str(answer.canonical_name).rstrip("."))
-        chain = []
-        response = getattr(answer, "response", None)
-        for rrset in getattr(response, "answer", ()):
-            if rrset.rdtype == dns.rdatatype.CNAME:
-                for rdata in rrset:
-                    chain.append(_validated_hostname(str(rdata.target).rstrip(".")))
-        addresses = tuple(
-            str(getattr(rdata, "address", rdata)).rstrip(".") for rdata in answer
+        answer_canonical = _validated_hostname(
+            str(answer.canonical_name).rstrip(".")
         )
-        return DnsQueryResult(hostname, canonical, addresses, tuple(chain))
+        response = getattr(answer, "response", None)
+        chain = self._validated_cname_chain(
+            hostname, getattr(response, "answer", ())
+        )
+        chain_canonical = chain[-1] if chain else hostname
+        canonical = chain_canonical if rdtype == "CNAME" else answer_canonical
+        if rdtype == "CNAME" and not chain and answer_canonical != hostname:
+            raise UrlSafetyError("DNS canonical host lacks a CNAME record")
+        if rdtype != "CNAME" and chain_canonical != answer_canonical:
+            raise UrlSafetyError("DNS CNAME chain does not reach canonical host")
+        addresses = (
+            ()
+            if rdtype == "CNAME"
+            else tuple(
+                str(getattr(rdata, "address", rdata)).rstrip(".")
+                for rdata in answer
+            )
+        )
+        return DnsQueryResult(hostname, canonical, addresses, chain)
+
+    @staticmethod
+    def _validated_cname_chain(hostname, rrsets) -> tuple[str, ...]:
+        targets_by_owner = {}
+        for rrset in rrsets:
+            try:
+                rdtype = rrset.rdtype
+            except AttributeError as error:
+                raise UrlSafetyError("DNS answer record is malformed") from error
+            if rdtype != dns.rdatatype.CNAME:
+                continue
+            try:
+                owner = _validated_hostname(str(rrset.name).rstrip("."))
+                targets = {
+                    _validated_hostname(str(rdata.target).rstrip("."))
+                    for rdata in rrset
+                }
+            except (AttributeError, TypeError) as error:
+                raise UrlSafetyError("DNS CNAME record is malformed") from error
+            if len(targets) != 1:
+                raise UrlSafetyError("DNS CNAME owner has conflicting targets")
+            target = next(iter(targets))
+            previous = targets_by_owner.get(owner)
+            if previous is not None and previous != target:
+                raise UrlSafetyError("DNS CNAME owner has conflicting targets")
+            targets_by_owner[owner] = target
+
+        if len(targets_by_owner) > 8:
+            raise UrlSafetyError("DNS CNAME chain exceeds the hop limit")
+
+        chain = []
+        visited_names = {hostname}
+        visited_owners = set()
+        current = hostname
+        while current in targets_by_owner:
+            visited_owners.add(current)
+            target = targets_by_owner[current]
+            if target in visited_names:
+                raise UrlSafetyError("DNS CNAME chain contains a loop")
+            chain.append(target)
+            if len(chain) > 8:
+                raise UrlSafetyError("DNS CNAME chain exceeds the hop limit")
+            visited_names.add(target)
+            current = target
+
+        if visited_owners != set(targets_by_owner):
+            raise UrlSafetyError("DNS CNAME chain is disconnected")
+        return tuple(chain)
