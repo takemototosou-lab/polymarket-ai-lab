@@ -221,7 +221,7 @@ POLYMARKET_AI_REASONING_EFFORT=low
 
 Phase 1はOpenAI、Brave Search、その他の外部providerや有料APIを呼びません。APIキーを読み取らず、存在確認もしません。ネットワーク通信、completed/error生成、analysis result更新、dataファイル作成・更新、一時ファイル、ログ、lock、retry、売買、wallet、注文を行いません。したがってPhase 1には料金発生経路がなく、契約、プラン、請求設定、支払い方法、自動継続課金も変更しません。trial、free credit、無料枠も使用しません。
 
-Phase 2Aは下記の内部fake基盤のみ実装しています。Phase 2B・2C・3は未実装です。将来、有料APIの実通信を追加する場合は、APIキーが存在するだけでは実行せず、利用者の明示承認を必須とします。dry-runの既定値は`true`のままとし、provider、対象市場数、最大request数、最大token数、最大予算を課金前に表示します。利用者が明示的に非dry-runへ変更し、最大予算が設定され、予算超過のおそれがない場合だけ実行候補にします。市場数、retry数、token上限、予算を自動的に増やさず、無料枠を前提にせず、契約・プラン・請求・支払い・自動継続課金を変更しません。
+Phase 2Aの内部fake基盤に加え、Phase 2B PR 1としてDNS/TLS基盤だけを実装しています。HTTP response解析、redirect orchestration、retry統合、Phase 2B CLI、lock/log統合、実通信は未実装です。Phase 2C・3も未実装です。将来、有料APIの実通信を追加する場合は、APIキーが存在するだけでは実行せず、利用者の明示承認を必須とします。dry-runの既定値は`true`のままとし、provider、対象市場数、最大request数、最大token数、最大予算を課金前に表示します。利用者が明示的に非dry-runへ変更し、最大予算が設定され、予算超過のおそれがない場合だけ実行候補にします。市場数、retry数、token上限、予算を自動的に増やさず、無料枠を前提にせず、契約・プラン・請求・支払い・自動継続課金を変更しません。
 
 ### Phase 2A内部基盤（完全オフライン）
 
@@ -249,6 +249,16 @@ JSONLの固定statusとevent policy（対象外フィールドはnull）:
 statusは`started`、`succeeded`、`failed`、`retry_scheduled`の4値だけです。`failed`と`retry_scheduled`はerror_code必須、`started`と`succeeded`はerror_code禁止です。コードは`url_safety`、`lock_conflict`、`dependency`、`response_contract`、`budget_limit`、`provider_auth`、`mime_rejected`だけ。任意値の許可範囲は`phase2_log.EVENT_POLICY`へ一元化しています。自由文、URL、query、本文、title、snippet、例外原文を受け取るフィールドはありません。`log_error`は有効なwriterに渡せる分類であり、失敗したwriterへの再書き込みはできません。
 
 Phase 2Bの実URL取得、Phase 2CのBrave通信は、それぞれ別設計・実行直前の明示承認が必要です。この内部基盤の統合は実通信の承認にはなりません。
+
+### Phase 2B PR 1 DNS/TLS基盤（実通信経路なし）
+
+`requirements.txt`では`dnspython>=2.8,<2.9`と`h11>=0.16,<0.17`をdirect dependencyとして固定しています。`h11`を使うHTTP parserは次のPRで実装するため、PR 1ではimportも実行もしません。
+
+`phase2_dns.py`はOS設定のDo53 recursive resolverだけを利用するproduction DNS backendと、注入backendを使うDNS orchestrationを提供します。A、AAAAの順に問い合わせ、CNAME最大8段、IP最大16件を既存IP policyで検証し、1件でもunsafeなIPがあれば結果全体を拒否します。timeout・resolver一時障害はdependency failureへ、NXDOMAIN・不正応答・policy違反はURL safety failureへ分類します。
+
+`phase2_tls.py`は`SSLContext(PROTOCOL_TLS_CLIENT)`を明示生成し、system trust、hostname検証、TLS 1.2以上、strict/partial-chain検証を必須にします。`SSLKEYLOGFILE`、custom CA、client certificate、proxy、検証無効化を利用しません。connectorは検証済みの数値IPへ直接接続し、元hostnameをSNI・証明書検証へ渡し、TLS直後に`getpeername()`をpinned setへ再照合します。接続failoverは先頭4 IPまでで、certificate・hostname・peer mismatchは直ちに安全性エラーとなります。
+
+テストはfake DNS backend、fake socket、fake TLS stream、既存fake clockだけを使い、通常テストとCIでreal DNS、socket、TLS network、HTTPを実行しません。`SSLKEYLOGFILE`非参照は分離processでも確認します。これらのモジュールは`run_external_analysis.py`と`external_analysis.py`から参照されず、production CLI経路には接続されていません。
 
 ## 取得条件
 
@@ -296,7 +306,7 @@ CSVは取得時点のスナップショットです。過去の検証では、�
 python -m unittest discover -s tests -v
 ```
 
-単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2Aの検証も含めて全264テストが成功しています。
+単体テストは外部APIへ接続しません。収集機からpending結果までの既存契約に加え、Phase 1の4設定、2.0 pending限定照合、入力順選択、15項目request、fake provider、決定的stdout、APIキー非参照、ネットワーク未使用、data SHA-256不変を確認します。Phase 2B PR 1のDNS/TLSオフライン検証を含めて全301テストが成功しています。
 
 ## 使用API
 
