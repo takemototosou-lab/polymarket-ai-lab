@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import dns.exception
 import dns.nameserver
@@ -299,8 +300,9 @@ class DnsOrchestrationTests(unittest.TestCase):
 
 
 class FakeResolver:
-    def __init__(self, nameservers):
+    def __init__(self, nameservers, port=53):
         self.nameservers = nameservers
+        self.port = port
         self.calls = []
 
     def resolve(self, hostname, rdtype, **kwargs):
@@ -435,6 +437,52 @@ class DnspythonBackendTests(unittest.TestCase):
             ],
             resolver.calls,
         )
+
+    def test_accepts_do53_nameserver_only_on_port_53(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        resolver = FakeResolver(
+            [dns.nameserver.Do53Nameserver("192.0.2.1", port=53)]
+        )
+        DnspythonQueryBackend(resolver)
+        self.assertEqual([], resolver.calls)
+
+    def test_rejects_do53_nameserver_on_nonstandard_port_before_query(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        resolver = FakeResolver(
+            [dns.nameserver.Do53Nameserver("192.0.2.1", port=5353)]
+        )
+        with self.assertRaises(UrlSafetyError):
+            DnspythonQueryBackend(resolver)
+        self.assertEqual([], resolver.calls)
+
+    def test_accepts_plain_ip_nameserver_when_resolver_port_is_53(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        resolver = FakeResolver(["192.0.2.1"], port=53)
+        DnspythonQueryBackend(resolver)
+        self.assertEqual([], resolver.calls)
+
+    def test_rejects_plain_ip_nameserver_on_nonstandard_resolver_port(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        resolver = FakeResolver(["192.0.2.1"], port=5353)
+        with self.assertRaises(UrlSafetyError):
+            DnspythonQueryBackend(resolver)
+        self.assertEqual([], resolver.calls)
+
+    def test_maps_missing_os_resolver_configuration_without_raw_text(self):
+        from phase2_dns import DnspythonQueryBackend
+
+        raw_text = "sensitive resolver detail"
+        with patch(
+            "phase2_dns.dns.resolver.Resolver",
+            side_effect=dns.resolver.NoResolverConfiguration(raw_text),
+        ):
+            with self.assertRaises(UrlSafetyError) as caught:
+                DnspythonQueryBackend()
+        self.assertNotIn(raw_text, str(caught.exception))
 
     def test_preserves_cname_when_requested_family_has_no_addresses(self):
         from phase2_dns import DnspythonQueryBackend

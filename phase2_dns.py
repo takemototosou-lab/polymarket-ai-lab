@@ -125,19 +125,29 @@ class DnspythonQueryBackend:
     """Use dnspython public APIs and only OS-configured Do53 nameservers."""
 
     def __init__(self, resolver=None) -> None:
-        self._resolver = resolver or dns.resolver.Resolver(configure=True)
+        if resolver is None:
+            try:
+                resolver = dns.resolver.Resolver(configure=True)
+            except dns.resolver.NoResolverConfiguration:
+                raise UrlSafetyError(
+                    "DNS resolver configuration is unavailable"
+                ) from None
+        self._resolver = resolver
         nameservers = tuple(self._resolver.nameservers)
-        if not nameservers or not all(self._is_do53(value) for value in nameservers):
+        resolver_port = getattr(self._resolver, "port", None)
+        if not nameservers or not all(
+            self._is_do53(value, resolver_port) for value in nameservers
+        ):
             raise UrlSafetyError("DNS resolver is not exclusively Do53")
 
     @staticmethod
-    def _is_do53(value) -> bool:
+    def _is_do53(value, resolver_port) -> bool:
         if isinstance(value, dns.nameserver.Do53Nameserver):
-            return True
+            return value.port == 53
         if isinstance(value, str):
             try:
                 ipaddress.ip_address(value)
-                return True
+                return resolver_port == 53
             except ValueError:
                 return False
         return False
